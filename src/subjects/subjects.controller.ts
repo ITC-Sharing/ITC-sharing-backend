@@ -13,26 +13,31 @@ import { CreateSubjectDto } from './dto/create-course.dto';
 
 @Controller('subjects')
 export class SubjectsController {
-  constructor(private readonly coursesService: SubjectsService) {}
+  constructor(private readonly subjectsService: SubjectsService) {}
 
   /**
    * GET /courses?major_id=<uuid>
    * Public — used to populate course dropdowns filtered by major
    */
   @Get()
-  findByMajor(@Query('major_id') majorId: string) {
-    if (!majorId)
-      throw new BadRequestException('major_id query param is required');
-    return this.coursesService.findByMajor(majorId);
+  findByMajor(
+    @Query('major_id') majorId: string,
+    @Query('year_level') yearLevel?: string, // ← add this
+  ) {
+    if (!majorId) throw new BadRequestException('major_id is required');
+    return this.subjectsService.findByMajor(
+      majorId,
+      yearLevel ? Number(yearLevel) : undefined,
+    );
   }
 
   /**
-   * POST /courses
-   * Any logged-in user can contribute a missing course
+   * POST /subjects
+   * Any logged-in user can contribute a missing subject
    */
   @UseGuards(JwtAuthGuard)
   @Post()
   create(@Body() dto: CreateSubjectDto) {
-    return this.coursesService.create(dto);
+    return this.subjectsService.create(dto);
   }
 }

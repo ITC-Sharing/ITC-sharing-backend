@@ -12,19 +12,19 @@ import { CreateSubjectDto } from './dto/create-course.dto';
 export class SubjectsService {
   constructor(private readonly supabaseService: SupabaseService) {}
 
-  async findByMajor(majorId: string) {
-    const { data, error } = await this.supabaseService
+  async findByMajor(majorId: string, yearLevel?: number) {
+    let req = this.supabaseService
       .getClient()
       .from('subjects')
-      .select('id, name, year_level, semester, major_id')
+      .select('id, name, semester, year_level')
       .eq('major_id', majorId)
-      .order('year_level')
-      .order('semester')
-      .order('name');
+      .order('semester');
 
+    if (yearLevel) req = req.eq('year_level', yearLevel); // ← add this
+
+    const { data, error } = await req;
     if (error)
       throw new InternalServerErrorException('Failed to fetch subjects');
-
     return data;
   }
 

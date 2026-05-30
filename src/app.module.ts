@@ -8,6 +8,8 @@ import { UsersModule } from './users/users.module';
 import { MajorsModule } from './majors/majors.module';
 import { SubjectsModule } from './subjects/subjects.module';
 import { DocumentsModule } from './documents/documents.module';
+import { AdminModule } from './admin/admin.module';
+import { NotificationsModule } from './notifications/notifications.module';
 
 @Module({
   imports: [
@@ -20,6 +22,8 @@ import { DocumentsModule } from './documents/documents.module';
     MajorsModule,
     SubjectsModule,
     DocumentsModule,
+    AdminModule,
+    NotificationsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

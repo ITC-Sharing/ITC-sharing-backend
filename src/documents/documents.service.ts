@@ -5,11 +5,25 @@ import {
   ForbiddenException,
   BadRequestException,
 } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { SupabaseService } from '../supabase/supabase.service';
 import { CreateDocumentDto } from './dto/create-document.dto';
 import { QueryDocumentsDto } from './dto/query-documents.dto';
 
 const STORAGE_BUCKET = 'documents';
+
+type UploadedDocument = {
+  id: string;
+  group_id: string;
+  title: string;
+  doc_type: string;
+  year_level: number | null;
+  file_url: string;
+  original_name: string | null;
+  file_size_kb: number;
+  status: string;
+  uploaded_at: string;
+};
 
 @Injectable()
 export class DocumentsService {
@@ -22,7 +36,36 @@ export class DocumentsService {
     dto: CreateDocumentDto,
     file: Express.Multer.File,
   ) {
+    return this.uploadSingle(uploaderId, dto, file, randomUUID());
+  }
+
+  async uploadMany(
+    uploaderId: string,
+    dto: CreateDocumentDto,
+    files: Express.Multer.File[],
+  ) {
+    if (!files?.length) {
+      throw new BadRequestException('No files provided');
+    }
+
+    const results: UploadedDocument[] = [];
+    const groupId = randomUUID();
+    for (const file of files) {
+      const doc = await this.uploadSingle(uploaderId, dto, file, groupId);
+      results.push(doc);
+    }
+
+    return results;
+  }
+
+  private async uploadSingle(
+    uploaderId: string,
+    dto: CreateDocumentDto,
+    file: Express.Multer.File,
+    groupId: string,
+  ): Promise<UploadedDocument> {
     const client = this.supabaseService.getClient();
+    const title = this.resolveTitle(dto.title, file.originalname);
 
     // 1. Build a unique storage path: <major_id>/<uploader_id>/<timestamp>-<filename>
     const ext = file.originalname.split('.').pop();
@@ -50,18 +93,22 @@ export class DocumentsService {
       .from('documents')
       .insert({
         uploader_id: uploaderId,
+        group_id: groupId,
         major_id: dto.major_id,
-        subject_id: dto.subject_id ?? null,
-        title: dto.title.trim(),
+        subject_id: dto.subject_id,
+        title,
         doc_type: dto.doc_type,
+        year_level: dto.year_level,
+        original_name: file.originalname,
+        academic_year: dto.academic_year,
         file_url: urlData.publicUrl,
         file_size_kb: Math.round(file.size / 1024),
-        status: 'active',
+        status: 'pending',
         download_count: 0,
         view_count: 0,
       })
       .select(
-        'id, title, doc_type, file_url, file_size_kb, status, uploaded_at',
+        'id, group_id, title, doc_type, year_level, file_url, original_name, academic_year, file_size_kb, status, uploaded_at',
       )
       .single();
 
@@ -90,7 +137,7 @@ export class DocumentsService {
       );
     }
 
-    const insertedDoc = doc as { id: string } | null;
+    const insertedDoc = doc as UploadedDocument | null;
     if (!insertedDoc?.id) {
       throw new InternalServerErrorException(
         'Document record created without id',
@@ -107,7 +154,13 @@ export class DocumentsService {
       await client.from('document_tags').insert(tagRows);
     }
 
-    return doc;
+    return insertedDoc;
+  }
+
+  private resolveTitle(title: string | undefined, originalName: string) {
+    const trimmed = title?.trim();
+    if (trimmed) return trimmed;
+    return originalName.replace(/\.[^.]+$/, '');
   }
 
   // ─── List ──────────────────────────────────────────────────────────────────
@@ -119,11 +172,12 @@ export class DocumentsService {
       .from('documents')
       .select(
         `
-        id, title, doc_type, file_url, file_size_kb,
-        download_count, view_count, status, uploaded_at,
+        id, group_id, title, doc_type, year_level, file_url, file_size_kb,
+        original_name, academic_year, download_count, view_count, status, uploaded_at,
         major_id, subject_id,
         users ( id, first_name, last_name, avatar_url ),
-        subjects ( id, name ),
+        subjects ( id, name, slug ),
+        majors ( id, acronym ),
         document_tags ( tag )
       `,
       )
@@ -133,7 +187,12 @@ export class DocumentsService {
     if (query.major_id) req = req.eq('major_id', query.major_id);
     if (query.subject_id) req = req.eq('subject_id', query.subject_id);
     if (query.doc_type) req = req.eq('doc_type', query.doc_type);
+    if (query.year_level) req = req.eq('year_level', query.year_level);
+    if (query.title) req = req.eq('title', query.title);
+    if (query.group_id) req = req.eq('group_id', query.group_id);
+    if (query.academic_year) req = req.eq('academic_year', query.academic_year);
     if (query.search) req = req.ilike('title', `%${query.search}%`);
+    if (query.uploader_id) req = req.eq('uploader_id', query.uploader_id);
 
     const { data, error } = await req;
 
@@ -151,11 +210,12 @@ export class DocumentsService {
       .from('documents')
       .select(
         `
-        id, title, doc_type, file_url, file_size_kb,
-        download_count, view_count, status, uploaded_at,
+        id, group_id, title, doc_type, year_level, file_url, file_size_kb,
+        original_name, download_count, view_count, status, uploaded_at,
         major_id, subject_id,
         users ( id, first_name, last_name, avatar_url ),
-        subjects ( id, name ),
+        subjects ( id, name, slug ),
+        major ( id, acronym ),
         document_tags ( tag )
       `,
       )
@@ -221,10 +281,40 @@ export class DocumentsService {
     if (doc.uploader_id !== userId)
       throw new ForbiddenException('Not your document');
 
-    // Soft delete — keeps the row, just hides it from queries
-    await client.from('documents').update({ status: 'deleted' }).eq('id', id);
+    const storagePath = this.extractStoragePath(doc.file_url);
+    if (storagePath) {
+      const { error: storageError } = await client.storage
+        .from(STORAGE_BUCKET)
+        .remove([storagePath]);
+
+      if (storageError) {
+        throw new InternalServerErrorException(
+          'Failed to remove document file',
+        );
+      }
+    }
+
+    await client.from('document_tags').delete().eq('document_id', id);
+    await client.from('document_saves').delete().eq('document_id', id);
+
+    const { error: deleteError } = await client
+      .from('documents')
+      .delete()
+      .eq('id', id);
+
+    if (deleteError) {
+      throw new InternalServerErrorException('Failed to delete document');
+    }
 
     return { message: 'Document deleted' };
+  }
+
+  private extractStoragePath(fileUrl: string | null) {
+    if (!fileUrl) return null;
+    const marker = `/storage/v1/object/public/${STORAGE_BUCKET}/`;
+    const index = fileUrl.indexOf(marker);
+    if (index === -1) return null;
+    return fileUrl.slice(index + marker.length);
   }
 
   // ─── Save / unsave ─────────────────────────────────────────────────────────

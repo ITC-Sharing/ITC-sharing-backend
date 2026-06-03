@@ -163,9 +163,9 @@ export class SubjectsService {
     const { data, error } = await this.supabaseService
       .getClient()
       .from('subjects')
-      .select('id, name, slug, year_level, semester, subject_url, status, majors ( id, acronym )')
+      .select('id, name, slug, year_level, semester, subject_url, status, rejection_reason, rejected_at, majors ( id, acronym )')
       .eq('submitted_by', userId)
-      .eq('status', 'pending')
+      .in('status', ['pending', 'rejected'])
       .order('id', { ascending: false });
 
     if (error) throw new InternalServerErrorException('Failed to fetch your subjects');

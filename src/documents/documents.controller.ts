@@ -9,7 +9,6 @@ import {
   Post,
   Query,
   Request,
-  UploadedFile,
   UploadedFiles,
   UseGuards,
   UseInterceptors,
@@ -96,6 +95,15 @@ export class DocumentsController {
   @Get('saved')
   getSaved(@Request() req: AuthenticatedRequest) {
     return this.documentsService.getSaved(req.user.sub);
+  }
+
+  /**
+   * GET /documents/mine  — user's pending + rejected submissions
+   */
+  @UseGuards(JwtAuthGuard)
+  @Get('mine')
+  findMine(@Request() req: AuthenticatedRequest) {
+    return this.documentsService.findMine(req.user.sub);
   }
 
   /**

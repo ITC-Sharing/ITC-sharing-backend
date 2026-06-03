@@ -72,8 +72,11 @@ export class AdminController {
 
   /** PATCH /admin/subjects/:id/reject */
   @Patch('subjects/:id/reject')
-  rejectSubject(@Param('id', ParseUUIDPipe) id: string) {
-    return this.adminService.rejectSubject(id);
+  rejectSubject(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body('reason') reason?: string,
+  ) {
+    return this.adminService.rejectSubject(id, reason);
   }
 
   /** GET /admin/pending/documents */
@@ -82,16 +85,25 @@ export class AdminController {
     return this.adminService.getPendingDocuments();
   }
 
-  /** PATCH /admin/documents/:id/approve */
-  @Patch('documents/:id/approve')
-  approveDocument(@Param('id', ParseUUIDPipe) id: string) {
-    return this.adminService.approveDocument(id);
+  /** GET /admin/documents/group/:groupId */
+  @Get('documents/group/:groupId')
+  getDocumentsByGroup(@Param('groupId', ParseUUIDPipe) groupId: string) {
+    return this.adminService.getDocumentsByGroup(groupId);
   }
 
-  /** PATCH /admin/documents/:id/reject */
-  @Patch('documents/:id/reject')
-  rejectDocument(@Param('id', ParseUUIDPipe) id: string) {
-    return this.adminService.rejectDocument(id);
+  /** PATCH /admin/documents/group/:groupId/approve */
+  @Patch('documents/group/:groupId/approve')
+  approveDocumentGroup(@Param('groupId', ParseUUIDPipe) groupId: string) {
+    return this.adminService.approveDocumentGroup(groupId);
+  }
+
+  /** PATCH /admin/documents/group/:groupId/reject */
+  @Patch('documents/group/:groupId/reject')
+  rejectDocumentGroup(
+    @Param('groupId', ParseUUIDPipe) groupId: string,
+    @Body('reason') reason?: string,
+  ) {
+    return this.adminService.rejectDocumentGroup(groupId, reason);
   }
 
   /** GET /admin/documents?search=&doc_type= */

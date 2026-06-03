@@ -80,13 +80,12 @@ export class AuthService {
       throw new UnauthorizedException('Invalid email or password');
     }
 
-    // Strip password from response
-    const { ...safeUser } = user;
+    const { password_hash: _, ...safeUser } = user;
 
     const token = this.signToken(user.id, user.email);
 
     return {
-      user: { ...safeUser },
+      user: safeUser,
       token,
     };
   }

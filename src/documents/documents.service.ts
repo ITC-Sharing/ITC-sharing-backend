@@ -288,7 +288,7 @@ export class DocumentsService {
         `id, title, doc_type, status, rejection_reason, rejected_at, uploaded_at,
          subjects ( id, name ),
          majors ( id, acronym ),
-         documents ( id, file_size_kb )`,
+         documents ( id, original_name, file_size_kb )`,
       )
       .eq('uploader_id', userId)
       .in('status', ['pending', 'rejected'])

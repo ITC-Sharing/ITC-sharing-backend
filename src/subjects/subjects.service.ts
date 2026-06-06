@@ -24,7 +24,8 @@ export class SubjectsService {
       .eq('major_id', majorId)
       .eq('status', 'active');
 
-    if (error) throw new InternalServerErrorException('Failed to fetch subject counts');
+    if (error)
+      throw new InternalServerErrorException('Failed to fetch subject counts');
 
     const counts: Record<number, number> = {};
     for (const row of data ?? []) {
@@ -61,7 +62,11 @@ export class SubjectsService {
     return data;
   }
 
-  async create(dto: CreateSubjectDto, image?: Express.Multer.File, submittedBy?: string) {
+  async create(
+    dto: CreateSubjectDto,
+    image?: Express.Multer.File,
+    submittedBy?: string,
+  ) {
     const client = this.supabaseService.getClient();
     const subjectUrl = dto.subject_url?.trim();
 
@@ -163,12 +168,15 @@ export class SubjectsService {
     const { data, error } = await this.supabaseService
       .getClient()
       .from('subjects')
-      .select('id, name, slug, year_level, semester, subject_url, status, rejection_reason, rejected_at, majors ( id, acronym )')
+      .select(
+        'id, name, slug, year_level, semester, subject_url, status, rejection_reason, rejected_at, created_at, majors ( id, acronym )',
+      )
       .eq('submitted_by', userId)
       .in('status', ['pending', 'rejected'])
       .order('id', { ascending: false });
 
-    if (error) throw new InternalServerErrorException('Failed to fetch your subjects');
+    if (error)
+      throw new InternalServerErrorException('Failed to fetch your subjects');
     return data;
   }
 
@@ -182,8 +190,10 @@ export class SubjectsService {
       .single();
 
     if (!existing) throw new NotFoundException('Subject not found');
-    if (existing.submitted_by !== userId) throw new ForbiddenException('Not your subject');
-    if (existing.status === 'active') throw new ForbiddenException('Cannot edit an approved subject');
+    if (existing.submitted_by !== userId)
+      throw new ForbiddenException('Not your subject');
+    if (existing.status === 'active')
+      throw new ForbiddenException('Cannot edit an approved subject');
 
     const updates: Record<string, any> = {};
     if (dto.name !== undefined) updates.name = dto.name.trim();
@@ -198,7 +208,8 @@ export class SubjectsService {
       .select('id, name, slug, year_level, semester, subject_url, status')
       .single();
 
-    if (error) throw new InternalServerErrorException('Failed to update subject');
+    if (error)
+      throw new InternalServerErrorException('Failed to update subject');
     return data;
   }
 
@@ -212,11 +223,14 @@ export class SubjectsService {
       .single();
 
     if (!existing) throw new NotFoundException('Subject not found');
-    if (existing.submitted_by !== userId) throw new ForbiddenException('Not your subject');
-    if (existing.status === 'active') throw new ForbiddenException('Cannot delete an approved subject');
+    if (existing.submitted_by !== userId)
+      throw new ForbiddenException('Not your subject');
+    if (existing.status === 'active')
+      throw new ForbiddenException('Cannot delete an approved subject');
 
     const { error } = await client.from('subjects').delete().eq('id', id);
-    if (error) throw new InternalServerErrorException('Failed to delete subject');
+    if (error)
+      throw new InternalServerErrorException('Failed to delete subject');
     return { message: 'Subject deleted' };
   }
 }

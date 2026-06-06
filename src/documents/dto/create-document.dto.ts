@@ -3,7 +3,7 @@ import {
   IsString,
   IsUUID,
   IsOptional,
-  IsIn,
+  IsEnum,
   IsArray,
   ArrayMaxSize,
   ArrayMinSize,
@@ -13,25 +13,30 @@ import {
   Max,
 } from 'class-validator';
 
-export const DOC_TYPES = [
-  'notes',
-  'assignment',
-  'past_exam',
-  'lab',
-  'lesson',
-] as const;
+export enum DocType {
+  Note = 'Note',
+  TD = 'TD',
+  ExaminationPaper = 'Examination paper',
+  TP = 'TP',
+  Project = 'Project',
+  Lesson = 'Lesson',
+  Other = 'Other',
+}
+
+export const DOC_TYPES = Object.values(DocType);
 
 export class CreateDocumentDto {
   @IsString()
   @MaxLength(150)
   title?: string;
 
-  @IsIn(DOC_TYPES)
-  doc_type: (typeof DOC_TYPES)[number];
+  @IsEnum(DocType)
+  doc_type: DocType;
 
   @IsUUID()
   major_id: string;
 
+  @IsOptional()
   @IsUUID()
   subject_id?: string;
 
@@ -41,7 +46,7 @@ export class CreateDocumentDto {
   @ArrayMinSize(1)
   @IsString({ each: true })
   @MaxLength(30, { each: true })
-  tags?: string[]; // e.g. ["midterm", "2023", "prof-smith"]
+  tags?: string[];
 
   @IsInt()
   @Type(() => Number)

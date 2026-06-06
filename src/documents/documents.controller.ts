@@ -35,6 +35,10 @@ const ALLOWED_MIME_TYPES = [
   'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   'image/jpeg',
   'image/png',
+  'application/zip',
+  'application/x-zip-compressed',
+  'application/x-rar-compressed',
+  'application/vnd.rar',
 ];
 const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024; // 20 MB
 const MAX_FILES_PER_UPLOAD = 10;

@@ -1,14 +1,14 @@
 import {
   IsOptional,
   IsUUID,
-  IsIn,
+  IsEnum,
   IsString,
   IsInt,
   Min,
   Max,
 } from 'class-validator';
 import { Type } from 'class-transformer';
-import { DOC_TYPES } from './create-document.dto';
+import { DocType } from './create-document.dto';
 
 export class QueryDocumentsDto {
   @IsOptional()
@@ -20,8 +20,8 @@ export class QueryDocumentsDto {
   subject_id?: string;
 
   @IsOptional()
-  @IsIn(DOC_TYPES)
-  doc_type?: (typeof DOC_TYPES)[number];
+  @IsEnum(DocType)
+  doc_type?: DocType;
 
   @IsOptional()
   @IsString()

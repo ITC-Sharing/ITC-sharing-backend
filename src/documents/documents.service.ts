@@ -17,97 +17,102 @@ export class DocumentsService {
 
   // ─── Upload ────────────────────────────────────────────────────────────────
 
-  async upload(
+  async uploadMany(
     uploaderId: string,
     dto: CreateDocumentDto,
-    file: Express.Multer.File,
+    files: Express.Multer.File[],
   ) {
+    if (!files?.length) throw new BadRequestException('No files provided');
+
     const client = this.supabaseService.getClient();
+    const title = this.resolveTitle(dto.title, files[0].originalname);
 
-    // 1. Build a unique storage path: <major_id>/<uploader_id>/<timestamp>-<filename>
-    const ext = file.originalname.split('.').pop();
-    const storagePath = `${dto.major_id}/${uploaderId}/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
-
-    // 2. Upload file buffer to Supabase Storage
-    const { error: storageError } = await client.storage
-      .from(STORAGE_BUCKET)
-      .upload(storagePath, file.buffer, {
-        contentType: file.mimetype,
-        upsert: false,
-      });
-
-    if (storageError) {
-      throw new InternalServerErrorException('File upload failed');
-    }
-
-    // 3. Get the public URL
-    const { data: urlData } = client.storage
-      .from(STORAGE_BUCKET)
-      .getPublicUrl(storagePath);
-
-    // 4. Insert document row
-    const { data: doc, error: dbError } = await client
-      .from('documents')
+    // 1. One uploads row for the entire batch
+    const { data: upload, error: uploadError } = await client
+      .from('uploads')
       .insert({
         uploader_id: uploaderId,
         major_id: dto.major_id,
         subject_id: dto.subject_id ?? null,
-        title: dto.title.trim(),
+        title,
         doc_type: dto.doc_type,
-        file_url: urlData.publicUrl,
-        file_size_kb: Math.round(file.size / 1024),
-        status: 'active',
-        download_count: 0,
-        view_count: 0,
+        year_level: dto.year_level,
+        academic_year: dto.academic_year ?? null,
+        status: 'pending',
       })
-      .select(
-        'id, title, doc_type, file_url, file_size_kb, status, uploaded_at',
-      )
+      .select('id')
       .single();
 
-    if (dbError) {
-      // Clean up orphaned file if DB insert fails
-      await client.storage.from(STORAGE_BUCKET).remove([storagePath]);
-
-      if (dbError.code === '23503') {
-        throw new BadRequestException(
-          dbError.message || 'Invalid major_id or subject_id',
-        );
-      }
-
-      if (dbError.code === '23502') {
-        throw new BadRequestException(
-          dbError.message || 'Missing required document field',
-        );
-      }
-
-      if (dbError.code === '42501') {
-        throw new ForbiddenException('You are not allowed to upload documents');
-      }
-
-      throw new InternalServerErrorException(
-        dbError.message || 'Failed to save document record',
-      );
+    if (uploadError || !upload) {
+      if (uploadError?.code === '23503')
+        throw new BadRequestException('Invalid major_id or subject_id');
+      throw new InternalServerErrorException('Failed to create upload record');
     }
 
-    const insertedDoc = doc as { id: string } | null;
-    if (!insertedDoc?.id) {
-      throw new InternalServerErrorException(
-        'Document record created without id',
-      );
+    // 2. One documents row per file
+    const fileResults: any[] = [];
+    for (const file of files) {
+      const doc = await this.uploadFile(upload.id, uploaderId, dto.major_id, file);
+      fileResults.push(doc);
     }
 
-    // 5. Insert tags if provided
-    if (dto.tags && dto.tags.length > 0) {
+    // 3. Tags reference upload_id
+    if (dto.tags?.length) {
       const tagRows = dto.tags.map((tag) => ({
-        document_id: insertedDoc.id,
+        upload_id: upload.id,
         tag: tag.toLowerCase().trim(),
       }));
-
       await client.from('document_tags').insert(tagRows);
     }
 
-    return doc;
+    return { upload_id: upload.id, files: fileResults };
+  }
+
+  private async uploadFile(
+    uploadId: string,
+    uploaderId: string,
+    majorId: string,
+    file: Express.Multer.File,
+  ) {
+    const client = this.supabaseService.getClient();
+    const ext = file.originalname.split('.').pop();
+    const storagePath = `${majorId}/${uploaderId}/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+
+    const { error: storageError } = await client.storage
+      .from(STORAGE_BUCKET)
+      .upload(storagePath, file.buffer, { contentType: file.mimetype, upsert: false });
+
+    if (storageError) throw new InternalServerErrorException('File upload failed');
+
+    const { data: urlData } = client.storage
+      .from(STORAGE_BUCKET)
+      .getPublicUrl(storagePath);
+
+    const { data: doc, error: dbError } = await client
+      .from('documents')
+      .insert({
+        upload_id: uploadId,
+        file_url: urlData.publicUrl,
+        original_name: file.originalname,
+        file_size_kb: Math.round(file.size / 1024),
+        download_count: 0,
+        view_count: 0,
+      })
+      .select('id, upload_id, file_url, original_name, file_size_kb')
+      .single();
+
+    if (dbError) {
+      await client.storage.from(STORAGE_BUCKET).remove([storagePath]);
+      throw new InternalServerErrorException('Failed to save document record');
+    }
+
+    return doc!;
+  }
+
+  private resolveTitle(title: string | undefined, originalName: string) {
+    const trimmed = title?.trim();
+    if (trimmed) return trimmed;
+    return originalName.replace(/\.[^.]+$/, '');
   }
 
   // ─── List ──────────────────────────────────────────────────────────────────
@@ -116,178 +121,203 @@ export class DocumentsService {
     const client = this.supabaseService.getClient();
 
     let req = client
-      .from('documents')
+      .from('uploads')
       .select(
-        `
-        id, title, doc_type, file_url, file_size_kb,
-        download_count, view_count, status, uploaded_at,
-        major_id, subject_id,
-        users ( id, first_name, last_name, avatar_url ),
-        subjects ( id, name ),
-        document_tags ( tag )
-      `,
+        `id, title, doc_type, year_level, academic_year, uploaded_at,
+         users ( id, first_name, last_name, avatar_url ),
+         majors ( id, acronym ),
+         subjects ( id, name, slug ),
+         document_tags ( tag ),
+         documents ( id, file_url, file_size_kb, download_count, view_count, original_name )`,
       )
       .eq('status', 'active')
       .order('uploaded_at', { ascending: false });
 
-    if (query.major_id) req = req.eq('major_id', query.major_id);
-    if (query.subject_id) req = req.eq('subject_id', query.subject_id);
-    if (query.doc_type) req = req.eq('doc_type', query.doc_type);
-    if (query.search) req = req.ilike('title', `%${query.search}%`);
+    if (query.major_id)     req = req.eq('major_id', query.major_id);
+    if (query.subject_id)   req = req.eq('subject_id', query.subject_id);
+    if (query.doc_type)     req = req.eq('doc_type', query.doc_type);
+    if (query.year_level)   req = req.eq('year_level', query.year_level);
+    if (query.academic_year) req = req.eq('academic_year', query.academic_year);
+    if (query.search)       req = req.ilike('title', `%${query.search}%`);
+    if (query.uploader_id)  req = req.eq('uploader_id', query.uploader_id);
 
     const { data, error } = await req;
-
-    if (error)
-      throw new InternalServerErrorException('Failed to fetch documents');
-
+    if (error) throw new InternalServerErrorException('Failed to fetch documents');
     return data;
   }
 
   // ─── Get one ───────────────────────────────────────────────────────────────
 
-  async findOne(id: string) {
+  async findOne(uploadId: string) {
     const { data, error } = await this.supabaseService
       .getClient()
-      .from('documents')
+      .from('uploads')
       .select(
-        `
-        id, title, doc_type, file_url, file_size_kb,
-        download_count, view_count, status, uploaded_at,
-        major_id, subject_id,
-        users ( id, first_name, last_name, avatar_url ),
-        subjects ( id, name ),
-        document_tags ( tag )
-      `,
+        `id, title, doc_type, year_level, academic_year, uploaded_at,
+         users ( id, first_name, last_name, avatar_url ),
+         majors ( id, acronym ),
+         subjects ( id, name, slug ),
+         document_tags ( tag ),
+         documents ( id, file_url, file_size_kb, download_count, view_count, original_name )`,
       )
-      .eq('id', id)
+      .eq('id', uploadId)
       .eq('status', 'active')
       .single();
 
     if (error || !data) throw new NotFoundException('Document not found');
-
     return data;
   }
 
-  // ─── Track view ────────────────────────────────────────────────────────────
+  // ─── Track view (per file) ─────────────────────────────────────────────────
 
-  async incrementView(id: string) {
+  async incrementView(documentId: string) {
     const client = this.supabaseService.getClient();
-
     const { data: doc } = await client
       .from('documents')
       .select('view_count')
-      .eq('id', id)
+      .eq('id', documentId)
       .single();
 
-    if (!doc) throw new NotFoundException('Document not found');
-
+    if (!doc) return;
     await client
       .from('documents')
       .update({ view_count: doc.view_count + 1 })
-      .eq('id', id);
+      .eq('id', documentId);
   }
 
-  // ─── Track download ────────────────────────────────────────────────────────
+  // ─── Track download (per file) ─────────────────────────────────────────────
 
-  async incrementDownload(id: string) {
+  async incrementDownload(documentId: string) {
     const client = this.supabaseService.getClient();
-
     const { data: doc } = await client
       .from('documents')
       .select('download_count')
-      .eq('id', id)
+      .eq('id', documentId)
       .single();
 
     if (!doc) throw new NotFoundException('Document not found');
-
     await client
       .from('documents')
       .update({ download_count: doc.download_count + 1 })
-      .eq('id', id);
+      .eq('id', documentId);
   }
 
-  // ─── Delete ────────────────────────────────────────────────────────────────
+  // ─── Delete (uploader only) ────────────────────────────────────────────────
 
-  async delete(id: string, userId: string) {
+  async delete(uploadId: string, userId: string) {
     const client = this.supabaseService.getClient();
 
-    const { data: doc } = await client
-      .from('documents')
-      .select('id, uploader_id, file_url')
-      .eq('id', id)
+    const { data: upload } = await client
+      .from('uploads')
+      .select('id, uploader_id')
+      .eq('id', uploadId)
       .single();
 
-    if (!doc) throw new NotFoundException('Document not found');
-    if (doc.uploader_id !== userId)
-      throw new ForbiddenException('Not your document');
+    if (!upload) throw new NotFoundException('Upload not found');
+    if (upload.uploader_id !== userId) throw new ForbiddenException('Not your upload');
 
-    // Soft delete — keeps the row, just hides it from queries
-    await client.from('documents').update({ status: 'deleted' }).eq('id', id);
+    const { data: files } = await client
+      .from('documents')
+      .select('file_url')
+      .eq('upload_id', uploadId);
 
-    return { message: 'Document deleted' };
+    if (files?.length) {
+      const paths = files
+        .map((f) => this.extractStoragePath(f.file_url))
+        .filter((p): p is string => p !== null);
+      if (paths.length) await client.storage.from(STORAGE_BUCKET).remove(paths);
+    }
+
+    // CASCADE deletes documents, document_tags, document_saves
+    const { error } = await client.from('uploads').delete().eq('id', uploadId);
+    if (error) throw new InternalServerErrorException('Failed to delete upload');
+
+    return { message: 'Upload deleted' };
+  }
+
+  private extractStoragePath(fileUrl: string | null): string | null {
+    if (!fileUrl) return null;
+    const marker = `/storage/v1/object/public/${STORAGE_BUCKET}/`;
+    const index = fileUrl.indexOf(marker);
+    if (index === -1) return null;
+    return fileUrl.slice(index + marker.length);
   }
 
   // ─── Save / unsave ─────────────────────────────────────────────────────────
 
-  async save(userId: string, documentId: string) {
+  async save(userId: string, uploadId: string) {
     const client = this.supabaseService.getClient();
 
-    // Verify document exists
-    const { data: doc } = await client
-      .from('documents')
+    const { data: upload } = await client
+      .from('uploads')
       .select('id')
-      .eq('id', documentId)
+      .eq('id', uploadId)
       .eq('status', 'active')
       .single();
 
-    if (!doc) throw new NotFoundException('Document not found');
+    if (!upload) throw new NotFoundException('Document not found');
 
     const { error } = await client
       .from('document_saves')
-      .insert({ user_id: userId, document_id: documentId });
+      .insert({ user_id: userId, upload_id: uploadId });
 
-    if (error?.code === '23505') {
-      throw new BadRequestException('Document already saved');
-    }
-    if (error)
-      throw new InternalServerErrorException('Failed to save document');
+    if (error?.code === '23505') throw new BadRequestException('Document already saved');
+    if (error) throw new InternalServerErrorException('Failed to save document');
 
     return { message: 'Document saved' };
   }
 
-  async unsave(userId: string, documentId: string) {
+  async unsave(userId: string, uploadId: string) {
     await this.supabaseService
       .getClient()
       .from('document_saves')
       .delete()
       .eq('user_id', userId)
-      .eq('document_id', documentId);
+      .eq('upload_id', uploadId);
 
     return { message: 'Document unsaved' };
   }
+
+  // ─── My uploads (pending / rejected) ──────────────────────────────────────
+
+  async findMine(userId: string) {
+    const { data, error } = await this.supabaseService
+      .getClient()
+      .from('uploads')
+      .select(
+        `id, title, doc_type, status, rejection_reason, rejected_at, uploaded_at,
+         subjects ( id, name ),
+         majors ( id, acronym ),
+         documents ( id, original_name, file_size_kb )`,
+      )
+      .eq('uploader_id', userId)
+      .in('status', ['pending', 'rejected'])
+      .order('uploaded_at', { ascending: false });
+
+    if (error) throw new InternalServerErrorException('Failed to fetch your documents');
+    return data;
+  }
+
+  // ─── Saved documents ───────────────────────────────────────────────────────
 
   async getSaved(userId: string) {
     const { data, error } = await this.supabaseService
       .getClient()
       .from('document_saves')
       .select(
-        `
-        saved_at,
-        documents (
-          id, title, doc_type, file_url, file_size_kb,
-          download_count, view_count, uploaded_at,
-          users ( id, first_name, last_name ),
-          subjects ( id, name ),
-          document_tags ( tag )
-        )
-      `,
+        `saved_at,
+         uploads (
+           id, title, doc_type, uploaded_at,
+           users ( id, first_name, last_name ),
+           subjects ( id, name ),
+           document_tags ( tag ),
+           documents ( id, file_url, file_size_kb, download_count, view_count )
+         )`,
       )
       .eq('user_id', userId)
       .order('saved_at', { ascending: false });
 
-    if (error)
-      throw new InternalServerErrorException('Failed to fetch saved documents');
-
+    if (error) throw new InternalServerErrorException('Failed to fetch saved documents');
     return data;
   }
 }

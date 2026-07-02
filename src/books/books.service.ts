@@ -62,8 +62,9 @@ export class BooksService {
   // ─── List available books ──────────────────────────────────────────────────
 
   async findAll(majorId?: string) {
-    let query = this.supabase
-      .getClient()
+    const client = this.supabase.getClient();
+
+    let query = client
       .from('books')
       .select(BOOK_SELECT)
       .eq('status', 'available')
@@ -73,21 +74,45 @@ export class BooksService {
 
     const { data, error } = await query;
     if (error) throw new InternalServerErrorException('Failed to fetch books');
-    return data;
+
+    const bookIds = (data ?? []).map((b: any) => b.id);
+    const activeBookIds = new Set<string>();
+    if (bookIds.length) {
+      const { data: activeRequests } = await client
+        .from('book_requests')
+        .select('book_id')
+        .in('book_id', bookIds)
+        .in('status', ['pending', 'accepted']);
+      for (const r of activeRequests ?? []) activeBookIds.add(r.book_id);
+    }
+
+    return (data ?? []).map((b: any) => ({
+      ...b,
+      has_active_request: activeBookIds.has(b.id),
+    }));
   }
 
   // ─── Get single book ───────────────────────────────────────────────────────
 
   async findOne(id: string) {
-    const { data, error } = await this.supabase
-      .getClient()
+    const client = this.supabase.getClient();
+
+    const { data, error } = await client
       .from('books')
       .select(BOOK_SELECT)
       .eq('id', id)
       .single();
 
     if (error || !data) throw new NotFoundException('Book not found');
-    return data;
+
+    const { data: activeRequest } = await client
+      .from('book_requests')
+      .select('id')
+      .eq('book_id', id)
+      .in('status', ['pending', 'accepted'])
+      .maybeSingle();
+
+    return { ...data, has_active_request: !!activeRequest };
   }
 
   // ─── Update own book ───────────────────────────────────────────────────────
@@ -133,6 +158,22 @@ export class BooksService {
     if (book.donor_id !== userId) throw new ForbiddenException('Not your book');
     if (book.status === 'donated')
       throw new BadRequestException('Donated books cannot be deleted');
+
+    // Remove notifications that point to this book's requests — once the book
+    // (and its requests, via cascade) is deleted they'd become dead links that
+    // 404 when a recipient opens them.
+    const { data: reqs } = await client
+      .from('book_requests')
+      .select('id')
+      .eq('book_id', id);
+    const reqIds = (reqs ?? []).map((r: any) => r.id);
+    if (reqIds.length) {
+      await client
+        .from('notifications')
+        .delete()
+        .eq('ref_type', 'book_request')
+        .in('ref_id', reqIds);
+    }
 
     const { error } = await client.from('books').delete().eq('id', id);
     if (error) throw new InternalServerErrorException('Failed to delete book');
@@ -193,15 +234,6 @@ export class BooksService {
       : 'Someone';
 
     this.notifications
-      .sendWebPush(
-        book.donor_id,
-        'New book request',
-        `${requesterName} wants "${book.title}"`,
-        '/dashboard',
-      )
-      .catch(() => {});
-
-    this.notifications
       .create({
         user_id: book.donor_id,
         type: 'book_request',
@@ -251,15 +283,6 @@ export class BooksService {
       : 'The donor will reach out to you';
 
     this.notifications
-      .sendWebPush(
-        req.requester_id,
-        'Request accepted!',
-        `"${book.title}" — ${contactLine}`,
-        '/books',
-      )
-      .catch(() => {});
-
-    this.notifications
       .create({
         user_id: req.requester_id,
         type: 'book_accepted',
@@ -274,7 +297,7 @@ export class BooksService {
 
   // ─── Decline a request ─────────────────────────────────────────────────────
 
-  async decline(bookId: string, requestId: string, userId: string) {
+  async decline(bookId: string, requestId: string, userId: string, reason?: string) {
     const client = this.supabase.getClient();
 
     const { data: book } = await client
@@ -300,23 +323,22 @@ export class BooksService {
 
     await client
       .from('book_requests')
-      .update({ status: 'declined', resolved_at: new Date().toISOString() })
+      .update({
+        status: 'declined',
+        resolved_at: new Date().toISOString(),
+        decline_reason: reason ?? null,
+      })
       .eq('id', requestId);
 
-    this.notifications
-      .sendWebPush(
-        req.requester_id,
-        'Request declined',
-        `Your request for "${book.title}" was declined`,
-        '/books',
-      )
-      .catch(() => {});
+    const declineMessage = reason
+      ? `Your request for "${book.title}" was declined: ${reason}`
+      : `Your request for "${book.title}" was declined`;
 
     this.notifications
       .create({
         user_id: req.requester_id,
         type: 'book_declined',
-        message: `Your request for "${book.title}" was declined`,
+        message: declineMessage,
         ref_id: requestId,
         ref_type: 'book_request',
       })
@@ -370,14 +392,34 @@ export class BooksService {
 
   // ─── Books I donated (with their active request, if any) ───────────────────
 
-  async getMyBooks(userId: string) {
+  async getMyBooks(userId: string, filter: 'all' | 'pending' | 'donated' = 'all') {
     const client = this.supabase.getClient();
 
-    const { data: books, error } = await client
+    // For the "pending requests" filter, narrow to the books that currently
+    // have a pending incoming request — resolved in the DB, not the browser.
+    let pendingBookIds: string[] | null = null;
+    if (filter === 'pending') {
+      const { data: reqRows } = await client
+        .from('book_requests')
+        .select('book_id, books!inner(donor_id)')
+        .eq('status', 'pending')
+        .eq('books.donor_id', userId);
+      pendingBookIds = [...new Set((reqRows ?? []).map((r: any) => r.book_id))];
+      if (!pendingBookIds.length) return [];
+    }
+
+    let query = client
       .from('books')
-      .select('id, title, cover_image_url, status, created_at')
+      .select(
+        'id, title, description, contact, cover_image_url, status, created_at, majors ( id, acronym )',
+      )
       .eq('donor_id', userId)
       .order('created_at', { ascending: false });
+
+    if (filter === 'donated') query = query.eq('status', 'donated');
+    if (pendingBookIds) query = query.in('id', pendingBookIds);
+
+    const { data: books, error } = await query;
 
     if (error) throw new InternalServerErrorException('Failed to fetch your books');
 
@@ -387,7 +429,7 @@ export class BooksService {
       const { data: reqs } = await client
         .from('book_requests')
         .select(
-          'id, book_id, status, contact, requested_at, users ( id, first_name, last_name, avatar_url )',
+          'id, book_id, status, message, contact, requested_at, users ( id, first_name, last_name, avatar_url )',
         )
         .in('book_id', bookIds)
         .in('status', ['pending', 'accepted'])
@@ -404,12 +446,17 @@ export class BooksService {
       return {
         id: b.id,
         title: b.title,
+        description: b.description,
+        contact: b.contact,
         cover_image_url: b.cover_image_url,
         status: b.status,
+        created_at: b.created_at,
+        majors: b.majors,
         request: r
           ? {
               id: r.id,
               status: r.status,
+              message: r.message,
               contact: r.status === 'accepted' ? r.contact : null,
               requested_at: r.requested_at,
               requester: {
@@ -424,12 +471,44 @@ export class BooksService {
     });
   }
 
-  // ─── Books I requested (outgoing requests) ─────────────────────────────────
+  // ─── Dashboard counts (cheap COUNT queries, no rows fetched) ───────────────
 
-  async getOutgoingRequests(userId: string) {
+  async getBookStats(userId: string) {
     const client = this.supabase.getClient();
 
-    const { data, error } = await client
+    const [listedRes, receivedRes, pendingIncomingRes] = await Promise.all([
+      client
+        .from('books')
+        .select('id', { count: 'exact', head: true })
+        .eq('donor_id', userId),
+      client
+        .from('book_requests')
+        .select('id', { count: 'exact', head: true })
+        .eq('requester_id', userId)
+        .eq('status', 'accepted'),
+      client
+        .from('book_requests')
+        .select('id, books!inner(donor_id)', { count: 'exact', head: true })
+        .eq('status', 'pending')
+        .eq('books.donor_id', userId),
+    ]);
+
+    return {
+      listed: listedRes.count ?? 0,
+      received: receivedRes.count ?? 0,
+      pendingIncoming: pendingIncomingRes.count ?? 0,
+    };
+  }
+
+  // ─── Books I requested (outgoing requests) ─────────────────────────────────
+
+  async getOutgoingRequests(
+    userId: string,
+    status?: 'pending' | 'accepted' | 'declined',
+  ) {
+    const client = this.supabase.getClient();
+
+    let query = client
       .from('book_requests')
       .select(
         `
@@ -442,6 +521,10 @@ export class BooksService {
       )
       .eq('requester_id', userId)
       .order('requested_at', { ascending: false });
+
+    if (status) query = query.eq('status', status);
+
+    const { data, error } = await query;
 
     if (error) throw new InternalServerErrorException('Failed to fetch your requests');
 
@@ -474,10 +557,10 @@ export class BooksService {
   async getRequestDetail(requestId: string, userId: string) {
     const client = this.supabase.getClient();
 
-    const { data: row } = await client
+    const { data: row, error } = await client
       .from('book_requests')
       .select(`
-        id, message, contact, status, requested_at, resolved_at,
+        id, message, contact, status, requested_at, resolved_at, decline_reason,
         books (
           id, title, cover_image_url, donor_id, contact,
           users!books_donor_id_fkey ( id, first_name, last_name, avatar_url )
@@ -485,8 +568,10 @@ export class BooksService {
         users ( id, first_name, last_name, avatar_url )
       `)
       .eq('id', requestId)
-      .single();
+      .maybeSingle();
 
+    // Don't swallow query failures (e.g. a missing column) as a "not found".
+    if (error) throw new InternalServerErrorException(error.message);
     if (!row) throw new NotFoundException('Request not found');
 
     const book: any = row.books ?? {};
@@ -506,6 +591,7 @@ export class BooksService {
       message: row.message,
       requested_at: row.requested_at,
       resolved_at: row.resolved_at,
+      decline_reason: row.decline_reason,
       book: {
         id: book.id,
         title: book.title,

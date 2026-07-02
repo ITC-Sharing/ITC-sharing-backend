@@ -18,6 +18,7 @@ import { memoryStorage } from 'multer';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { DocumentsService } from './documents.service';
 import { CreateDocumentDto, DOC_TYPES } from './dto/create-document.dto';
+import { UpdateDocumentDto } from './dto/update-document.dto';
 import { QueryDocumentsDto } from './dto/query-documents.dto';
 
 type AuthenticatedRequest = {
@@ -93,15 +94,6 @@ export class DocumentsController {
   }
 
   /**
-   * GET /documents/saved  — must be above :id to avoid route conflict
-   */
-  @UseGuards(JwtAuthGuard)
-  @Get('saved')
-  getSaved(@Request() req: AuthenticatedRequest) {
-    return this.documentsService.getSaved(req.user.sub);
-  }
-
-  /**
    * GET /documents/mine  — user's pending + rejected submissions
    */
   @UseGuards(JwtAuthGuard)
@@ -133,30 +125,6 @@ export class DocumentsController {
   }
 
   /**
-   * POST /documents/:id/save
-   */
-  @UseGuards(JwtAuthGuard)
-  @Post(':id/save')
-  save(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Request() req: AuthenticatedRequest,
-  ) {
-    return this.documentsService.save(req.user.sub, id);
-  }
-
-  /**
-   * DELETE /documents/:id/save
-   */
-  @UseGuards(JwtAuthGuard)
-  @Delete(':id/save')
-  unsave(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Request() req: AuthenticatedRequest,
-  ) {
-    return this.documentsService.unsave(req.user.sub, id);
-  }
-
-  /**
    * DELETE /documents/:id
    * Soft delete — uploader only
    */
@@ -167,5 +135,57 @@ export class DocumentsController {
     @Request() req: AuthenticatedRequest,
   ) {
     return this.documentsService.delete(id, req.user.sub);
+  }
+
+  /**
+   * PATCH /documents/:id
+   * Edit an upload's metadata (uploader only). Re-submits it for review.
+   */
+  @UseGuards(JwtAuthGuard)
+  @Patch(':id')
+  update(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateDocumentDto,
+    @Request() req: AuthenticatedRequest,
+  ) {
+    return this.documentsService.update(id, req.user.sub, dto);
+  }
+
+  /**
+   * POST /documents/:id/files — add files to an existing upload (uploader only).
+   */
+  @UseGuards(JwtAuthGuard)
+  @Post(':id/files')
+  @UseInterceptors(
+    FilesInterceptor('files', MAX_FILES_PER_UPLOAD, {
+      storage: memoryStorage(),
+      limits: { fileSize: MAX_FILE_SIZE_BYTES },
+      fileFilter: (_req, file, cb) => {
+        if (ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+          cb(null, true);
+        } else {
+          cb(new Error('Unsupported file type'), false);
+        }
+      },
+    }),
+  )
+  addFiles(
+    @Param('id', ParseUUIDPipe) id: string,
+    @UploadedFiles() files: Express.Multer.File[],
+    @Request() req: AuthenticatedRequest,
+  ) {
+    return this.documentsService.addFiles(id, req.user.sub, files);
+  }
+
+  /**
+   * DELETE /documents/files/:fileId — remove a single file (uploader only).
+   */
+  @UseGuards(JwtAuthGuard)
+  @Delete('files/:fileId')
+  removeFile(
+    @Param('fileId', ParseUUIDPipe) fileId: string,
+    @Request() req: AuthenticatedRequest,
+  ) {
+    return this.documentsService.removeFile(fileId, req.user.sub);
   }
 }

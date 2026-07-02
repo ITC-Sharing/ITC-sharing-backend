@@ -1,8 +1,12 @@
+import { Type } from 'class-transformer';
 import {
   IsEmail,
+  IsInt,
   IsNotEmpty,
   IsString,
   IsUUID,
+  Max,
+  Min,
   // Matches,
   MinLength,
 } from 'class-validator';
@@ -29,4 +33,10 @@ export class RegisterDto {
   @IsUUID('4', { message: 'Major must be a valid selection' })
   @IsNotEmpty({ message: 'Please select your major' })
   major_id: string;
+
+  @Type(() => Number)
+  @IsInt({ message: 'Please select your academic year' })
+  @Min(1)
+  @Max(5)
+  year_level: number;
 }

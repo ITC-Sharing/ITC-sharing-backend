@@ -20,6 +20,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CreateBookDto } from './dto/create-book.dto';
 import { UpdateBookDto } from './dto/update-book.dto';
 import { CreateRequestDto } from './dto/create-request.dto';
+import { DeclineRequestDto } from './dto/decline-request.dto';
 
 type AuthReq = { user: { sub: string } };
 
@@ -63,8 +64,18 @@ export class BooksController {
 
   @UseGuards(JwtAuthGuard)
   @Get('mine')
-  getMyBooks(@Request() req: AuthReq) {
-    return this.booksService.getMyBooks(req.user.sub);
+  getMyBooks(@Request() req: AuthReq, @Query('filter') filter?: string) {
+    const allowed = ['all', 'pending', 'donated'] as const;
+    const safe = (allowed as readonly string[]).includes(filter ?? '')
+      ? (filter as 'all' | 'pending' | 'donated')
+      : 'all';
+    return this.booksService.getMyBooks(req.user.sub, safe);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('stats')
+  getStats(@Request() req: AuthReq) {
+    return this.booksService.getBookStats(req.user.sub);
   }
 
   @UseGuards(JwtAuthGuard)
@@ -75,8 +86,12 @@ export class BooksController {
 
   @UseGuards(JwtAuthGuard)
   @Get('requests/outgoing')
-  getOutgoingRequests(@Request() req: AuthReq) {
-    return this.booksService.getOutgoingRequests(req.user.sub);
+  getOutgoingRequests(@Request() req: AuthReq, @Query('status') status?: string) {
+    const allowed = ['pending', 'accepted', 'declined'] as const;
+    const safe = (allowed as readonly string[]).includes(status ?? '')
+      ? (status as 'pending' | 'accepted' | 'declined')
+      : undefined;
+    return this.booksService.getOutgoingRequests(req.user.sub, safe);
   }
 
   @UseGuards(JwtAuthGuard)
@@ -116,7 +131,12 @@ export class BooksController {
 
   @UseGuards(JwtAuthGuard)
   @Patch(':id/request/:requestId/decline')
-  decline(@Param('id') id: string, @Param('requestId') requestId: string, @Request() req: AuthReq) {
-    return this.booksService.decline(id, requestId, req.user.sub);
+  decline(
+    @Param('id') id: string,
+    @Param('requestId') requestId: string,
+    @Request() req: AuthReq,
+    @Body() dto: DeclineRequestDto,
+  ) {
+    return this.booksService.decline(id, requestId, req.user.sub, dto.reason);
   }
 }

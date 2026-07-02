@@ -39,7 +39,7 @@ export class QueryDocumentsDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  @Max(4)
+  @Max(5)
   year_level?: number;
 
   @IsOptional()
@@ -50,4 +50,17 @@ export class QueryDocumentsDto {
   @IsOptional()
   @IsUUID()
   uploader_id?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(50)
+  limit?: number;
 }

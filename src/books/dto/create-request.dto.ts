@@ -1,10 +1,10 @@
-import { IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsNotEmpty, IsString, MaxLength } from 'class-validator';
 
 export class CreateRequestDto {
   @IsString()
-  @IsOptional()
+  @IsNotEmpty({ message: 'Message is required' })
   @MaxLength(500)
-  message?: string;
+  message!: string;
 
   @IsString()
   @IsNotEmpty({ message: 'Contact is required so the donor can reach you' })

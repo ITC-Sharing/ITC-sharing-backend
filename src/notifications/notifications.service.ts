@@ -1,5 +1,6 @@
 import { Injectable, InternalServerErrorException } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { NotificationsGateway } from './notifications.gateway';
 
 export interface CreateNotificationPayload {
   user_id: string;
@@ -11,7 +12,10 @@ export interface CreateNotificationPayload {
 
 @Injectable()
 export class NotificationsService {
-  constructor(private readonly supabaseService: SupabaseService) {}
+  constructor(
+    private readonly supabaseService: SupabaseService,
+    private readonly gateway: NotificationsGateway,
+  ) {}
 
   async getForUser(userId: string) {
     const { data, error } = await this.supabaseService
@@ -22,7 +26,8 @@ export class NotificationsService {
       .order('created_at', { ascending: false })
       .limit(30);
 
-    if (error) throw new InternalServerErrorException('Failed to fetch notifications');
+    if (error)
+      throw new InternalServerErrorException('Failed to fetch notifications');
     return data;
   }
 
@@ -34,7 +39,10 @@ export class NotificationsService {
       .eq('id', id)
       .eq('user_id', userId);
 
-    if (error) throw new InternalServerErrorException('Failed to mark notification as read');
+    if (error)
+      throw new InternalServerErrorException(
+        'Failed to mark notification as read',
+      );
     return { message: 'Marked as read' };
   }
 
@@ -46,12 +54,13 @@ export class NotificationsService {
       .eq('user_id', userId)
       .eq('is_read', false);
 
-    if (error) throw new InternalServerErrorException('Failed to mark all as read');
+    if (error)
+      throw new InternalServerErrorException('Failed to mark all as read');
     return { message: 'All marked as read' };
   }
 
   async create(payload: CreateNotificationPayload) {
-    const { error } = await this.supabaseService
+    const { data, error } = await this.supabaseService
       .getClient()
       .from('notifications')
       .insert({
@@ -60,8 +69,14 @@ export class NotificationsService {
         message: payload.message,
         ref_id: payload.ref_id ?? null,
         ref_type: payload.ref_type ?? null,
-      });
+      })
+      .select('id, type, message, is_read, ref_id, ref_type, created_at')
+      .single();
 
-    if (error) throw new InternalServerErrorException('Failed to create notification');
+    if (error)
+      throw new InternalServerErrorException('Failed to create notification');
+
+    // Push it to the recipient in real time (if they're connected).
+    this.gateway.emitToUser(payload.user_id, 'notification', data);
   }
 }

@@ -12,12 +12,12 @@ import {
 export class UpdateUserDto {
   @IsOptional()
   @IsString()
-  @MaxLength(10)
+  @MaxLength(50)
   first_name?: string;
 
   @IsOptional()
   @IsString()
-  @MaxLength(10)
+  @MaxLength(50)
   last_name?: string;
 
   @IsOptional()

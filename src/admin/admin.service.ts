@@ -404,7 +404,7 @@ export class AdminService {
       if (paths.length) await client.storage.from('documents').remove(paths);
     }
 
-    // CASCADE removes documents, document_tags, document_saves
+    // CASCADE removes documents + document_tags
     const { error } = await client.from('uploads').delete().eq('id', uploadId);
     if (error) throw new InternalServerErrorException('Failed to delete upload');
 

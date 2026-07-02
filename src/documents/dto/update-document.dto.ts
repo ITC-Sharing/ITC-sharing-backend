@@ -6,34 +6,21 @@ import {
   IsEnum,
   IsArray,
   ArrayMaxSize,
-  ArrayMinSize,
   MaxLength,
   IsInt,
   Min,
   Max,
   Matches,
 } from 'class-validator';
+import { DocType } from './create-document.dto';
 
-export enum DocType {
-  Note = 'Note',
-  TD = 'TD',
-  ExaminationPaper = 'Examination paper',
-  TP = 'TP',
-  Project = 'Project',
-  Lesson = 'Lesson',
-  Thesis = 'Thesis',
-  Other = 'Other',
-}
-
-export const DOC_TYPES = Object.values(DocType);
-
-// Letters (any language, incl. Khmer marks), numbers, spaces and hyphens —
-// at least one letter/number. No special characters.
+// Letters (any language, incl. Khmer marks), numbers, spaces and hyphens.
 const TITLE_PATTERN = /^(?=.*[\p{L}\p{N}])[\p{L}\p{M}\p{N}\s-]+$/u;
-// A single tag — letters/numbers (any language) joined by single hyphens.
 const TAG_PATTERN = /^[\p{L}\p{M}\p{N}]+(?:-[\p{L}\p{M}\p{N}]+)*$/u;
 
-export class CreateDocumentDto {
+// Metadata-only edit of an existing upload (files are not changed here).
+export class UpdateDocumentDto {
+  @IsOptional()
   @IsString()
   @MaxLength(150)
   @Matches(TITLE_PATTERN, {
@@ -41,20 +28,21 @@ export class CreateDocumentDto {
   })
   title?: string;
 
+  @IsOptional()
   @IsEnum(DocType)
-  doc_type: DocType;
-
-  @IsUUID()
-  major_id: string;
+  doc_type?: DocType;
 
   @IsOptional()
   @IsUUID()
-  subject_id?: string;
+  major_id?: string;
+
+  @IsOptional()
+  @IsUUID()
+  subject_id?: string | null;
 
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(3)
-  @ArrayMinSize(1)
   @IsString({ each: true })
   @MaxLength(30, { each: true })
   @Matches(TAG_PATTERN, {
@@ -63,11 +51,12 @@ export class CreateDocumentDto {
   })
   tags?: string[];
 
-  @IsInt()
+  @IsOptional()
   @Type(() => Number)
+  @IsInt()
   @Min(1)
   @Max(5)
-  year_level: number;
+  year_level?: number;
 
   @IsOptional()
   @IsString()

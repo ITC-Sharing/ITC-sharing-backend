@@ -6,6 +6,8 @@ import {
 import { SupabaseService } from '../supabase/supabase.service';
 import { UpdateUserDto } from './dto/update-user.dto';
 
+const AVATAR_BUCKET = 'avatars';
+
 @Injectable()
 export class UsersService {
   constructor(private readonly supabaseService: SupabaseService) {}
@@ -59,6 +61,18 @@ export class UsersService {
       return this.getMe(userId);
     }
 
+    // If the avatar is being changed or removed, remember the old one so we can
+    // delete the now-orphaned file from storage after the row is updated.
+    let oldAvatarUrl: string | null = null;
+    if (dto.avatar_url !== undefined) {
+      const { data: current } = await client
+        .from('users')
+        .select('avatar_url')
+        .eq('id', userId)
+        .single();
+      oldAvatarUrl = current?.avatar_url ?? null;
+    }
+
     const { error } = await client
       .from('users')
       .update(updates)
@@ -68,6 +82,43 @@ export class UsersService {
       throw new InternalServerErrorException('Failed to update profile');
     }
 
+    if (oldAvatarUrl && oldAvatarUrl !== dto.avatar_url) {
+      await this.deleteAvatarFile(oldAvatarUrl);
+    }
+
     return this.getMe(userId);
+  }
+
+  /** Removes an avatar file from storage given its public URL. Best-effort. */
+  private async deleteAvatarFile(avatarUrl: string) {
+    const marker = `/storage/v1/object/public/${AVATAR_BUCKET}/`;
+    const index = avatarUrl.indexOf(marker);
+    if (index === -1) return;
+    const path = avatarUrl.slice(index + marker.length);
+    await this.supabaseService
+      .getClient()
+      .storage.from(AVATAR_BUCKET)
+      .remove([path]);
+  }
+
+  async uploadAvatar(userId: string, file: Express.Multer.File) {
+    const client = this.supabaseService.getClient();
+    const ext = file.originalname.split('.').pop();
+    const path = `${userId}/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+
+    const { error } = await client.storage
+      .from(AVATAR_BUCKET)
+      .upload(path, file.buffer, {
+        contentType: file.mimetype,
+        upsert: false,
+      });
+
+    if (error) {
+      // Surface the real cause (e.g. "Bucket not found") instead of a generic 500.
+      throw new InternalServerErrorException(`Avatar upload failed: ${error.message}`);
+    }
+
+    const { data } = client.storage.from(AVATAR_BUCKET).getPublicUrl(path);
+    return { url: data.publicUrl };
   }
 }

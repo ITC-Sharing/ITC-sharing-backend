@@ -10,6 +10,7 @@ import { SubjectsModule } from './subjects/subjects.module';
 import { DocumentsModule } from './documents/documents.module';
 import { AdminModule } from './admin/admin.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { BooksModule } from './books/books.module';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { NotificationsModule } from './notifications/notifications.module';
     DocumentsModule,
     AdminModule,
     NotificationsModule,
+    BooksModule,
   ],
   controllers: [AppController],
   providers: [AppService],

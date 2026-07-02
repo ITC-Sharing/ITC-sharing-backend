@@ -23,7 +23,7 @@ export class AdminGuard implements CanActivate {
       .eq('id', userId)
       .single();
 
-    if (data?.role !== 'admin') {
+    if (data?.role?.toLowerCase() !== 'admin') {
       throw new ForbiddenException('Admin access required');
     }
 

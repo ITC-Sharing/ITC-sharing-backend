@@ -1,4 +1,5 @@
 import { Injectable, InternalServerErrorException } from '@nestjs/common';
+import * as webpush from 'web-push';
 import { SupabaseService } from '../supabase/supabase.service';
 
 export interface CreateNotificationPayload {
@@ -9,9 +10,25 @@ export interface CreateNotificationPayload {
   ref_type?: string;
 }
 
+import { IsObject, IsString } from 'class-validator';
+
+export class PushSubscriptionDto {
+  @IsString()
+  endpoint!: string;
+
+  @IsObject()
+  keys!: { p256dh: string; auth: string };
+}
+
 @Injectable()
 export class NotificationsService {
-  constructor(private readonly supabaseService: SupabaseService) {}
+  constructor(private readonly supabaseService: SupabaseService) {
+    webpush.setVapidDetails(
+      process.env.VAPID_EMAIL!,
+      process.env.VAPID_PUBLIC_KEY!,
+      process.env.VAPID_PRIVATE_KEY!,
+    );
+  }
 
   async getForUser(userId: string) {
     const { data, error } = await this.supabaseService
@@ -63,5 +80,56 @@ export class NotificationsService {
       });
 
     if (error) throw new InternalServerErrorException('Failed to create notification');
+  }
+
+  // ─── Web push ──────────────────────────────────────────────────────────────
+
+  async savePushSubscription(userId: string, sub: PushSubscriptionDto) {
+    const { error } = await this.supabaseService
+      .getClient()
+      .from('push_subscriptions')
+      .upsert(
+        {
+          user_id: userId,
+          endpoint: sub.endpoint,
+          p256dh: sub.keys.p256dh,
+          auth: sub.keys.auth,
+        },
+        { onConflict: 'user_id,endpoint' },
+      );
+
+    if (error) throw new InternalServerErrorException('Failed to save push subscription');
+    return { message: 'Subscribed' };
+  }
+
+  async sendWebPush(userId: string, title: string, body: string, url?: string) {
+    const { data: subs } = await this.supabaseService
+      .getClient()
+      .from('push_subscriptions')
+      .select('endpoint, p256dh, auth')
+      .eq('user_id', userId);
+
+    if (!subs?.length) return;
+
+    const payload = JSON.stringify({ title, body, url: url ?? '/' });
+
+    await Promise.allSettled(
+      subs.map((s) =>
+        webpush
+          .sendNotification(
+            { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
+            payload,
+          )
+          .catch(async (err: any) => {
+            if (err.statusCode === 410 || err.statusCode === 404) {
+              await this.supabaseService
+                .getClient()
+                .from('push_subscriptions')
+                .delete()
+                .eq('endpoint', s.endpoint);
+            }
+          }),
+      ),
+    );
   }
 }

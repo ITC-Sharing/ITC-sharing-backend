@@ -8,7 +8,10 @@ async function bootstrap() {
 
   app.use(cookieParser());
   app.enableCors({
-    origin: 'http://localhost:5173', // your Vue dev server
+    origin: [
+      'http://localhost:5173',
+      'https://itc-sharing-frontend.vercel.app',
+    ],
     credentials: true,
   });
   app.useGlobalPipes(

@@ -4,15 +4,16 @@ import {
   IsOptional,
   IsString,
   MaxLength,
-  Min,
-  Max,
   Matches,
 } from 'class-validator';
 import { Type } from 'class-transformer';
-import { SUBJECT_NAME_PATTERN } from './create-subject.dto';
-import { SUBJECT_SLUG_PATTERN } from './create-subject.dto';
+import {
+  SUBJECT_NAME_PATTERN,
+  SUBJECT_SLUG_PATTERN,
+} from '../../subjects/dto/create-subject.dto';
 
-export class UpdateSubjectDto {
+// Admin edit of an existing subject — name, slug and/or semester.
+export class EditSubjectDto {
   @IsOptional()
   @IsString()
   @MaxLength(20)
@@ -21,13 +22,14 @@ export class UpdateSubjectDto {
   })
   name?: string;
 
+  @IsOptional()
   @IsString()
   @MaxLength(10)
   @Matches(SUBJECT_SLUG_PATTERN, {
     message:
       'Slug can only contain lowercase letters, numbers and single hyphens',
   })
-  slug!: string;
+  slug?: string;
 
   @IsOptional()
   @IsInt()

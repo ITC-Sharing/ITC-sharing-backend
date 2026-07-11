@@ -18,21 +18,14 @@ export class AdminService {
   async getStats() {
     const client = this.supabaseService.getClient();
 
-    const [usersCount, uploadsCount, docsResult] = await Promise.all([
+    const [usersCount, uploadsCount] = await Promise.all([
       client.from('users').select('id', { count: 'exact', head: true }),
       client.from('uploads').select('id', { count: 'exact', head: true }).eq('status', 'active'),
-      client.from('documents').select('download_count, view_count'),
     ]);
-
-    const docs = docsResult.data ?? [];
-    const totalDownloads = docs.reduce((sum, d) => sum + (d.download_count ?? 0), 0);
-    const totalViews    = docs.reduce((sum, d) => sum + (d.view_count ?? 0), 0);
 
     return {
       totalUsers:      usersCount.count  ?? 0,
       totalDocuments:  uploadsCount.count ?? 0,
-      totalDownloads,
-      totalViews,
     };
   }
 
@@ -47,7 +40,7 @@ export class AdminService {
          users    ( id, first_name, last_name ),
          majors   ( id, acronym ),
          subjects ( id, name ),
-         documents ( file_size_kb, download_count )`,
+         documents ( file_size_kb )`,
       )
       .eq('status', 'active')
       .order('uploaded_at', { ascending: false })
@@ -89,7 +82,7 @@ export class AdminService {
          majors   ( id, acronym ),
          subjects ( id, name ),
          document_tags ( tag ),
-         documents ( id, file_url, original_name, file_size_kb, download_count, view_count )`,
+         documents ( id, file_url, original_name, file_size_kb )`,
       )
       .eq('status', 'active')
       .order('uploaded_at', { ascending: false });
@@ -190,10 +183,14 @@ export class AdminService {
     return data;
   }
 
-  async editSubject(id: string, name: string, semester?: number) {
+  async editSubject(
+    id: string,
+    dto: { name?: string; slug?: string; semester?: number },
+  ) {
     const updates: Record<string, any> = {};
-    if (name?.trim())        updates.name     = name.trim();
-    if (semester !== undefined) updates.semester = semester;
+    if (dto.name?.trim())        updates.name     = dto.name.trim();
+    if (dto.slug?.trim())        updates.slug     = dto.slug.trim();
+    if (dto.semester !== undefined) updates.semester = dto.semester;
 
     const { error } = await this.supabaseService
       .getClient()

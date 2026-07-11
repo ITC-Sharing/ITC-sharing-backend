@@ -22,7 +22,7 @@ const TAG_PATTERN = /^[\p{L}\p{M}\p{N}]+(?:-[\p{L}\p{M}\p{N}]+)*$/u;
 export class UpdateDocumentDto {
   @IsOptional()
   @IsString()
-  @MaxLength(150)
+  @MaxLength(20)
   @Matches(TITLE_PATTERN, {
     message: 'Title must not contain special characters',
   })
@@ -44,7 +44,7 @@ export class UpdateDocumentDto {
   @IsArray()
   @ArrayMaxSize(3)
   @IsString({ each: true })
-  @MaxLength(30, { each: true })
+  @MaxLength(10, { each: true })
   @Matches(TAG_PATTERN, {
     each: true,
     message: 'Tags can only contain letters, numbers and hyphens',
@@ -60,6 +60,6 @@ export class UpdateDocumentDto {
 
   @IsOptional()
   @IsString()
-  @MaxLength(20)
+  @MaxLength(10)
   academic_year?: string;
 }

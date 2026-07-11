@@ -104,24 +104,11 @@ export class DocumentsController {
 
   /**
    * GET /documents/:id
-   * Also increments view count
    */
   @UseGuards(JwtAuthGuard)
   @Get(':id')
-  async findOne(@Param('id', ParseUUIDPipe) id: string) {
-    const doc = await this.documentsService.findOne(id);
-    void this.documentsService.incrementView(id); // fire-and-forget, don't await
-    return doc;
-  }
-
-  /**
-   * PATCH /documents/:id/download
-   * Called by frontend when user actually downloads the file
-   */
-  @UseGuards(JwtAuthGuard)
-  @Patch(':id/download')
-  incrementDownload(@Param('id', ParseUUIDPipe) id: string) {
-    return this.documentsService.incrementDownload(id);
+  findOne(@Param('id', ParseUUIDPipe) id: string) {
+    return this.documentsService.findOne(id);
   }
 
   /**

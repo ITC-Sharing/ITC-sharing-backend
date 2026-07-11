@@ -105,8 +105,6 @@ export class DocumentsService {
         file_url: urlData.publicUrl,
         original_name: file.originalname,
         file_size_kb: Math.round(file.size / 1024),
-        download_count: 0,
-        view_count: 0,
       })
       .select('id, upload_id, file_url, original_name, file_size_kb')
       .single();
@@ -138,7 +136,7 @@ export class DocumentsService {
          majors ( id, acronym ),
          subjects ( id, name, slug ),
          document_tags ( tag ),
-         documents ( id, file_url, file_size_kb, download_count, view_count, original_name )`,
+         documents ( id, file_url, file_size_kb, original_name )`,
         { count: 'exact' },
       )
       .eq('status', 'active')
@@ -177,7 +175,7 @@ export class DocumentsService {
          majors ( id, acronym ),
          subjects ( id, name, slug ),
          document_tags ( tag ),
-         documents ( id, file_url, file_size_kb, download_count, view_count, original_name )`,
+         documents ( id, file_url, file_size_kb, original_name )`,
       )
       .eq('id', uploadId)
       .eq('status', 'active')
@@ -185,40 +183,6 @@ export class DocumentsService {
 
     if (error || !data) throw new NotFoundException('Document not found');
     return data;
-  }
-
-  // ─── Track view (per file) ─────────────────────────────────────────────────
-
-  async incrementView(documentId: string) {
-    const client = this.supabaseService.getClient();
-    const { data: doc } = await client
-      .from('documents')
-      .select('view_count')
-      .eq('id', documentId)
-      .single();
-
-    if (!doc) return;
-    await client
-      .from('documents')
-      .update({ view_count: doc.view_count + 1 })
-      .eq('id', documentId);
-  }
-
-  // ─── Track download (per file) ─────────────────────────────────────────────
-
-  async incrementDownload(documentId: string) {
-    const client = this.supabaseService.getClient();
-    const { data: doc } = await client
-      .from('documents')
-      .select('download_count')
-      .eq('id', documentId)
-      .single();
-
-    if (!doc) throw new NotFoundException('Document not found');
-    await client
-      .from('documents')
-      .update({ download_count: doc.download_count + 1 })
-      .eq('id', documentId);
   }
 
   // ─── Delete (uploader only) ────────────────────────────────────────────────

@@ -24,14 +24,14 @@ export class CreateSubjectDto {
   major_id!: string;
 
   @IsString()
-  @MaxLength(80)
+  @MaxLength(20)
   @Matches(SUBJECT_NAME_PATTERN, {
     message: 'Subject name must not contain special characters',
   })
   name!: string;
 
   @IsString()
-  @MaxLength(80)
+  @MaxLength(10)
   @Matches(SUBJECT_SLUG_PATTERN, {
     message:
       'Slug can only contain lowercase letters, numbers and single hyphens',

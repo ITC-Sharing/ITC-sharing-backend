@@ -12,6 +12,7 @@ import {
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AdminGuard } from './guards/admin.guard';
 import { AdminService } from './admin.service';
+import { EditSubjectDto } from './dto/edit-subject.dto';
 
 @Controller('admin')
 @UseGuards(JwtAuthGuard, AdminGuard)
@@ -48,14 +49,13 @@ export class AdminController {
     return this.adminService.getAllSubjects(search);
   }
 
-  /** PATCH /admin/subjects/:id — edit name / semester */
+  /** PATCH /admin/subjects/:id — edit name / slug / semester */
   @Patch('subjects/:id')
   editSubject(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body('name') name: string,
-    @Body('semester') semester?: number,
+    @Body() dto: EditSubjectDto,
   ) {
-    return this.adminService.editSubject(id, name, semester);
+    return this.adminService.editSubject(id, dto);
   }
 
   /** DELETE /admin/subjects/:id */

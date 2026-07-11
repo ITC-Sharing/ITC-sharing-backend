@@ -11,6 +11,8 @@ import { CreateSubjectDto } from './dto/create-subject.dto';
 import { UpdateSubjectDto } from './dto/update-subject.dto';
 
 const SUBJECTS_STORAGE_BUCKET = 'subject-images';
+const DEFAULT_SUBJECT_IMAGE_URL =
+  'https://unyfbtktbxbulxemmoga.supabase.co/storage/v1/object/public/subject-images/d0479768-e6d2-4460-8cca-889cf560ab6a/no-image.png';
 
 @Injectable()
 export class SubjectsService {
@@ -108,7 +110,8 @@ export class SubjectsService {
       uploadedImageUrl = publicUrlData.publicUrl;
     }
 
-    const finalSubjectUrl = uploadedImageUrl ?? subjectUrl ?? null;
+    const finalSubjectUrl =
+      uploadedImageUrl ?? subjectUrl ?? DEFAULT_SUBJECT_IMAGE_URL;
 
     const { data, error } = await client
       .from('subjects')

@@ -8,10 +8,7 @@ async function bootstrap() {
 
   app.use(cookieParser());
   app.enableCors({
-    origin: [
-      'http://localhost:5173',
-      'https://itc-sharing-frontend.vercel.app',
-    ],
+    origin: ['http://localhost:5173'],
     credentials: true,
   });
   app.useGlobalPipes(

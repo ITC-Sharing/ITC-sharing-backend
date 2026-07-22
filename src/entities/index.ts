@@ -1,0 +1,10 @@
+export { Major } from './major.entity';
+export { User } from './user.entity';
+export { Subject } from './subject.entity';
+export { Upload } from './upload.entity';
+export { DocumentFile } from './document.entity';
+export { DocumentTag } from './document-tag.entity';
+export { Notification } from './notification.entity';
+export { Book } from './book.entity';
+export { BookRequest } from './book-request.entity';
+export { RefreshToken } from './refresh-token.entity';

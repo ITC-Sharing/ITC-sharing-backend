@@ -27,9 +27,32 @@
 
 ## Project setup
 
+The backend runs on **self-hosted Postgres** (via TypeORM) with **S3-compatible object
+storage** (MinIO locally). Both are provided by `docker-compose.yml`.
+
 ```bash
+# 1. Install dependencies
 $ npm install
+
+# 2. Start Postgres + MinIO (schema is auto-created from db/init.sql on first boot,
+#    and the `itc-sharing` storage bucket is created + made public automatically)
+$ docker compose up -d
+
+# 3. Copy env template and adjust if needed
+$ cp .env.example .env
 ```
+
+Services:
+- Postgres → `localhost:5432` (db `itc_sharing`, user `itc`)
+- MinIO API → `localhost:9000` · MinIO console → `localhost:9001` (`minioadmin` / `minioadmin`)
+
+Configuration lives in `.env`:
+- `DATABASE_URL` — Postgres connection string
+- `S3_ENDPOINT`, `S3_REGION`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_PUBLIC_URL` — object storage
+
+The database schema is owned by [`db/init.sql`](db/init.sql) (TypeORM runs with
+`synchronize: false`). Edit that file to change the schema; recreate the volume
+(`docker compose down -v && docker compose up -d`) to re-apply it from scratch.
 
 ## Compile and run the project
 

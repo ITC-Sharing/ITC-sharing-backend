@@ -66,8 +66,16 @@ export class BooksController {
   }
 
   @Get()
-  findAll(@Query('major_id') majorId?: string) {
-    return this.booksService.findAll(majorId);
+  findAll(
+    @Query('major_id') majorId?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.booksService.findAll(
+      majorId,
+      page ? Number(page) : undefined,
+      limit ? Number(limit) : undefined,
+    );
   }
 
   @UseGuards(JwtAuthGuard)

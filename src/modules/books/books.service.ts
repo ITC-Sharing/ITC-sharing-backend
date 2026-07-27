@@ -90,21 +90,32 @@ export class BooksService {
 
   // ─── List available books ──────────────────────────────────────────────────
 
-  async findAll(majorId?: string) {
+  async findAll(majorId?: string, page?: number, limit?: number) {
+    // Opt-in pagination: skip/take only when a limit is given, so callers that
+    // don't page still receive every match. `total` always reflects the full
+    // filtered set so a pager can compute its page count.
+    const currentPage = page && page > 0 ? page : 1;
+
     let books: Book[];
+    let total: number;
     try {
       const qb = this.books
         .createQueryBuilder('b')
         .leftJoinAndSelect('b.donor', 'donor')
         .leftJoinAndSelect('b.major', 'major')
         .where('b.status = :status', { status: 'available' })
-        .orderBy('b.created_at', 'DESC');
+        .orderBy('b.created_at', 'DESC')
+        // Unique tiebreaker so rows sharing a created_at can't shift between
+        // pages under skip/take.
+        .addOrderBy('b.id', 'ASC');
       if (majorId) qb.andWhere('b.major_id = :majorId', { majorId });
-      books = await qb.getMany();
+      if (limit && limit > 0) qb.skip((currentPage - 1) * limit).take(limit);
+      [books, total] = await qb.getManyAndCount();
     } catch {
       throw new InternalServerErrorException('Failed to fetch books');
     }
 
+    // Active-request lookup is scoped to the books on this page.
     const bookIds = books.map((b) => b.id);
     const activeBookIds = new Set<string>();
     if (bookIds.length) {
@@ -115,10 +126,11 @@ export class BooksService {
       for (const r of activeRequests) activeBookIds.add(r.book_id);
     }
 
-    return books.map((b) => ({
+    const items = books.map((b) => ({
       ...this.bookShape(b),
       has_active_request: activeBookIds.has(b.id),
     }));
+    return { items, total, page: currentPage, limit: limit ?? total };
   }
 
   // ─── Get single book ───────────────────────────────────────────────────────

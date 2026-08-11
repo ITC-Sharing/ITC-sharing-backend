@@ -43,7 +43,9 @@ create table if not exists subjects (
   id               uuid primary key default gen_random_uuid(),
   major_id         uuid not null references majors (id) on delete cascade,
   name             text not null,
-  slug             text not null,
+  -- Short display code (initials of `name`, uppercased). Shown on the subject
+  -- card when no cover image was uploaded. Derived by the API; admin-editable.
+  acronym          text not null,
   year_level       integer not null,
   semester         integer,
   subject_url      text,
@@ -63,11 +65,30 @@ create table if not exists uploads (
   major_id         uuid not null references majors (id) on delete cascade,
   subject_id       uuid references subjects (id) on delete set null,
   title            text not null,
+  description      text,
   doc_type         text not null,
   year_level       integer not null,
   academic_year    text,
   status           text not null default 'pending'
                      check (status in ('pending','active','rejected')),
+  -- Who may see this upload once active. 'public' = everyone (default);
+  -- 'department' = only users in the upload's major_id; 'department_year' =
+  -- only users matching both major_id and year_level. Uploader + admins always
+  -- see it regardless. Enforced in the feed/detail queries.
+  -- Who may see this upload once active, as explicit (department, year) pairs:
+  --   [{"major_id": "…", "year_level": 3}, …]
+  -- Empty = visible to everyone. A viewer matches when the array contains their
+  -- own department and year, so "GIC year 3 + AMS year 5" says exactly that and
+  -- nothing more. Uploader + admins always see it. Enforced in the feed/detail
+  -- queries. Uploads belonging to the Department of Foreign Languages always
+  -- store an empty array — every student takes those courses and nobody
+  -- registers into it as a department, so restricting one would only hide it.
+  -- The API enforces that.
+  audience         jsonb     not null default '[]'::jsonb,
+  -- Optional soft expiry. Null = never expires. Once past, the upload is kept
+  -- (all data intact) but hidden from everyone except its uploader and admins.
+  -- Enforced in the feed/detail queries.
+  expires_at       timestamptz,
   rejection_reason text,
   rejected_at      timestamptz,
   uploaded_at      timestamptz not null default now()
@@ -78,18 +99,28 @@ create table if not exists documents (
   id            uuid primary key default gen_random_uuid(),
   upload_id     uuid not null references uploads (id) on delete cascade,
   file_url      text not null,
+  -- PDF rendition for in-browser preview of office files; null otherwise.
+  preview_url   text,
   original_name text,
   file_size_kb  integer
 );
 
--- ─── document_tags ───────────────────────────────────────────────────────────
-create table if not exists document_tags (
-  id        uuid primary key default gen_random_uuid(),
-  upload_id uuid not null references uploads (id) on delete cascade,
-  tag       text not null,
-  -- Name pinned so a freshly-created database matches a migrated one exactly
-  -- (002-constraints.sql adds this constraint under the same name).
-  constraint document_tags_upload_tag_key unique (upload_id, tag)
+-- ─── staged_files ────────────────────────────────────────────────────────────
+-- One object already in MinIO that isn't attached to an upload yet: the form
+-- sends each file as soon as it's picked, then POST /documents claims them by
+-- id. Rows left behind are swept on the owner's next staging request.
+create table if not exists staged_files (
+  id            uuid primary key default gen_random_uuid(),
+  uploader_id   uuid not null references users (id) on delete cascade,
+  file_url      text not null,
+  -- Bucket-relative object keys, kept so the objects can be removed when a
+  -- staged file is discarded or swept.
+  storage_key   text not null,
+  preview_url   text,
+  preview_key   text,
+  original_name text,
+  file_size_kb  integer,
+  created_at    timestamptz not null default now()
 );
 
 -- ─── notifications ───────────────────────────────────────────────────────────
@@ -163,9 +194,13 @@ create index if not exists idx_uploads_uploader_recent
 create index if not exists idx_uploads_major        on uploads (major_id);
 create index if not exists idx_subjects_major       on subjects (major_id);
 create index if not exists idx_subjects_submitted_by on subjects (submitted_by);
+-- Audience containment lookups in the feed query.
+create index if not exists idx_uploads_audience
+  on uploads using gin (audience jsonb_path_ops);
+create index if not exists idx_staged_files_uploader
+  on staged_files (uploader_id, created_at);
 create index if not exists idx_users_major          on users (major_id);
 create index if not exists idx_documents_upload     on documents (upload_id);
-create index if not exists idx_document_tags_upload on document_tags (upload_id);
 create index if not exists idx_books_donor          on books (donor_id);
 create index if not exists idx_books_major_status   on books (major_id, status);
 create index if not exists idx_book_requests_book   on book_requests (book_id);
@@ -180,6 +215,10 @@ create index if not exists idx_notifications_user_created
 -- and every search would be a full scan. GIN trigram fixes that.
 create index if not exists idx_uploads_title_trgm
   on uploads using gin (title gin_trgm_ops);
+
+-- Search matches the description too (see 016-uploads-description-trgm.sql).
+create index if not exists idx_uploads_description_trgm
+  on uploads using gin (description gin_trgm_ops);
 
 -- Drive the retention job (see 004-retention.sql).
 create index if not exists idx_refresh_tokens_expires

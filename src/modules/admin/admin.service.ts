@@ -122,12 +122,14 @@ export class AdminService {
       .leftJoinAndSelect('u.uploader', 'uploader')
       .leftJoinAndSelect('u.major', 'major')
       .leftJoinAndSelect('u.subject', 'subject')
-      .leftJoinAndSelect('u.tags', 'tags')
       .leftJoinAndSelect('u.documents', 'documents')
       .where('u.status = :status', { status: 'active' })
       .orderBy('u.uploaded_at', 'DESC');
 
-    if (search) qb.andWhere('u.title ILIKE :search', { search: `%${search}%` });
+    if (search)
+      qb.andWhere('(u.title ILIKE :search OR u.description ILIKE :search)', {
+        search: `%${search}%`,
+      });
     if (docType) qb.andWhere('u.doc_type = :docType', { docType });
 
     let rows: Upload[];
@@ -151,7 +153,7 @@ export class AdminService {
         : null,
       majors: u.major ? { id: u.major.id, acronym: u.major.acronym } : null,
       subjects: u.subject ? { id: u.subject.id, name: u.subject.name } : null,
-      document_tags: (u.tags ?? []).map((t) => ({ tag: t.tag })),
+      description: u.description,
       documents: (u.documents ?? []).map((d) => ({
         id: d.id,
         file_url: d.file_url,
@@ -271,7 +273,7 @@ export class AdminService {
     return {
       id: s.id,
       name: s.name,
-      slug: s.slug,
+      acronym: s.acronym,
       year_level: s.year_level,
       semester: s.semester,
       subject_url: s.subject_url,
@@ -288,11 +290,11 @@ export class AdminService {
 
   async editSubject(
     id: string,
-    dto: { name?: string; slug?: string; semester?: number },
+    dto: { name?: string; acronym?: string; semester?: number },
   ) {
     const updates: Partial<Subject> = {};
     if (dto.name?.trim()) updates.name = dto.name.trim();
-    if (dto.slug?.trim()) updates.slug = dto.slug.trim();
+    if (dto.acronym?.trim()) updates.acronym = dto.acronym.trim();
     if (dto.semester !== undefined) updates.semester = dto.semester;
 
     try {
@@ -490,7 +492,7 @@ export class AdminService {
       .filter((k): k is string => k !== null);
     if (keys.length) await this.storage.remove(keys);
 
-    // CASCADE removes documents + document_tags
+    // CASCADE removes documents
     try {
       await this.uploads.delete({ id: uploadId });
     } catch {

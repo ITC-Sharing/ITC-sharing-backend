@@ -49,7 +49,7 @@ export class AdminController {
     return this.adminService.getAllSubjects(search);
   }
 
-  /** PATCH /admin/subjects/:id — edit name / slug / semester */
+  /** PATCH /admin/subjects/:id — edit name / acronym / semester */
   @Patch('subjects/:id')
   editSubject(
     @Param('id', ParseUUIDPipe) id: string,

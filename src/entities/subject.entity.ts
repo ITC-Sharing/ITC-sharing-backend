@@ -24,8 +24,9 @@ export class Subject {
   @Column('text')
   name: string;
 
+  // Short display code (initials of `name`), shown when a subject has no cover.
   @Column('text')
-  slug: string;
+  acronym: string;
 
   @Column('int')
   year_level: number;

@@ -13,6 +13,7 @@ import { BUCKETS, StorageService } from '../storage/storage.service';
 import { pgCode, errMessage } from '../../common/utils/pg-error';
 import { CreateSubjectDto } from './dto/create-subject.dto';
 import { UpdateSubjectDto } from './dto/update-subject.dto';
+import { acronymFromName } from '../../common/utils/acronym';
 
 @Injectable()
 export class SubjectsService {
@@ -54,7 +55,7 @@ export class SubjectsService {
       .select([
         's.id',
         's.name',
-        's.slug',
+        's.acronym',
         's.semester',
         's.year_level',
         's.subject_url',
@@ -108,7 +109,7 @@ export class SubjectsService {
 
     // Null when the submitter supplied neither a file nor a URL. Deliberately
     // NOT a placeholder image: the client decides what to render for a subject
-    // with no cover (SubjectCard shows the slug), and it can only do that if
+    // with no cover (SubjectCard shows the acronym), and it can only do that if
     // "no cover" is representable.
     const finalSubjectUrl = uploadedImageUrl ?? subjectUrl ?? null;
 
@@ -117,7 +118,9 @@ export class SubjectsService {
         this.subjects.create({
           major_id: dto.major_id,
           name: dto.name.trim(),
-          slug: dto.slug.trim(),
+          // Never supplied by the form — initials of the name. Admins can
+          // override it afterwards.
+          acronym: acronymFromName(dto.name),
           year_level: dto.year_level,
           semester: dto.semester,
           subject_url: finalSubjectUrl,
@@ -129,7 +132,7 @@ export class SubjectsService {
       return {
         id: saved.id,
         name: saved.name,
-        slug: saved.slug,
+        acronym: saved.acronym,
         year_level: saved.year_level,
         semester: saved.semester,
         major_id: saved.major_id,
@@ -174,7 +177,7 @@ export class SubjectsService {
     return rows.map((s) => ({
       id: s.id,
       name: s.name,
-      slug: s.slug,
+      acronym: s.acronym,
       year_level: s.year_level,
       semester: s.semester,
       subject_url: s.subject_url,
@@ -199,7 +202,11 @@ export class SubjectsService {
       throw new ForbiddenException('Cannot edit an approved subject');
 
     const updates: Partial<Subject> = {};
-    if (dto.name !== undefined) updates.name = dto.name.trim();
+    if (dto.name !== undefined) {
+      updates.name = dto.name.trim();
+      // The acronym follows the name; overriding it is an admin action.
+      updates.acronym = acronymFromName(dto.name);
+    }
     if (dto.semester !== undefined) updates.semester = dto.semester;
 
     if (!Object.keys(updates).length) return existing;
@@ -215,7 +222,7 @@ export class SubjectsService {
       select: {
         id: true,
         name: true,
-        slug: true,
+        acronym: true,
         year_level: true,
         semester: true,
         subject_url: true,

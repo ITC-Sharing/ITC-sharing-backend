@@ -25,6 +25,12 @@ export class DocumentFile {
   @Column('text')
   file_url: string;
 
+  // PDF rendition for in-browser preview of office files (pptx/docx/xlsx),
+  // generated on upload via LibreOffice. Null for files that don't need one
+  // (already-previewable pdf/images) or when conversion was unavailable/failed.
+  @Column({ type: 'text', nullable: true })
+  preview_url: string | null;
+
   @Column({ type: 'text', nullable: true })
   original_name: string | null;
 

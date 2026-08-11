@@ -16,8 +16,10 @@ import { Type } from 'class-transformer';
 // hyphens — and at least one letter/number.
 export const SUBJECT_NAME_PATTERN =
   /^(?=.*[\p{L}\p{N}])[\p{L}\p{M}\p{N}\s-]+$/u;
-// Lowercase kebab-case: letters/numbers split by single hyphens.
-export const SUBJECT_SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+// A subject's acronym: letters/numbers with no lowercase, e.g. WD, DS, A1.
+// Letters are matched by Unicode class rather than [A-Z0-9] so a Khmer name can
+// still produce one — scripts without case pass the "no lowercase" test.
+export const SUBJECT_ACRONYM_PATTERN = /^(?!.*\p{Ll})[\p{L}\p{M}\p{N}]+$/u;
 
 export class CreateSubjectDto {
   @IsUUID()
@@ -29,14 +31,6 @@ export class CreateSubjectDto {
     message: 'Subject name must not contain special characters',
   })
   name!: string;
-
-  @IsString()
-  @MaxLength(10)
-  @Matches(SUBJECT_SLUG_PATTERN, {
-    message:
-      'Slug can only contain lowercase letters, numbers and single hyphens',
-  })
-  slug!: string;
 
   @IsInt()
   @Type(() => Number)

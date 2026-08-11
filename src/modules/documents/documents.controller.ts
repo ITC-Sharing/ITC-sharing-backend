@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -9,15 +10,22 @@ import {
   Post,
   Query,
   Request,
+  UploadedFile,
   UploadedFiles,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
-import { FilesInterceptor } from '@nestjs/platform-express';
+import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { DocumentsService } from './documents.service';
-import { CreateDocumentDto, DOC_TYPES } from './dto/create-document.dto';
+import {
+  CreateDocumentDto,
+  DEPARTMENT_DOC_TYPES,
+  DOC_TYPES,
+  LANGUAGE_DOC_TYPES,
+} from './dto/create-document.dto';
+import { AddFilesDto } from './dto/add-files.dto';
 import { UpdateDocumentDto } from './dto/update-document.dto';
 import { QueryDocumentsDto } from './dto/query-documents.dto';
 
@@ -50,11 +58,17 @@ export class DocumentsController {
 
   /**
    * GET /documents/types  — public, no auth required
-   * Returns the list of valid document type values from the enum.
+   * Every valid document type, plus the subset each kind of course offers:
+   * `department` for the engineering departments, `language` for the
+   * Department of Foreign Languages. `types` is the union of both.
    */
   @Get('types')
   getTypes() {
-    return { types: DOC_TYPES };
+    return {
+      types: DOC_TYPES,
+      department: DEPARTMENT_DOC_TYPES,
+      language: LANGUAGE_DOC_TYPES,
+    };
   }
 
   /**
@@ -85,12 +99,55 @@ export class DocumentsController {
   }
 
   /**
+   * POST /documents/staged-files — send one file ahead of the metadata.
+   *
+   * The upload form calls this as soon as a file is picked, so the transfer
+   * happens while the user is still filling in the form. Returns the handle to
+   * pass back as `staged_file_ids` on POST /documents.
+   */
+  @UseGuards(JwtAuthGuard)
+  @Post('staged-files')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      limits: { fileSize: MAX_FILE_SIZE_BYTES },
+      fileFilter: (_req, file, cb) => {
+        if (ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+          cb(null, true);
+        } else {
+          cb(new BadRequestException('Unsupported file type'), false);
+        }
+      },
+    }),
+  )
+  stageFile(
+    @Request() req: AuthenticatedRequest,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    if (!file) throw new BadRequestException('No file provided');
+    return this.documentsService.stageFile(req.user.sub, file);
+  }
+
+  /** DELETE /documents/staged-files/:id — the user removed it from the form. */
+  @UseGuards(JwtAuthGuard)
+  @Delete('staged-files/:id')
+  deleteStagedFile(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Request() req: AuthenticatedRequest,
+  ) {
+    return this.documentsService.deleteStagedFile(id, req.user.sub);
+  }
+
+  /**
    * GET /documents?major_id=&subject_id=&doc_type=&search=
    */
   @UseGuards(JwtAuthGuard)
   @Get()
-  findAll(@Query() query: QueryDocumentsDto) {
-    return this.documentsService.findAll(query);
+  findAll(
+    @Query() query: QueryDocumentsDto,
+    @Request() req: AuthenticatedRequest,
+  ) {
+    return this.documentsService.findAll(query, req.user.sub);
   }
 
   /**
@@ -119,8 +176,11 @@ export class DocumentsController {
    */
   @UseGuards(JwtAuthGuard)
   @Get(':id')
-  findOne(@Param('id', ParseUUIDPipe) id: string) {
-    return this.documentsService.findOne(id);
+  findOne(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Request() req: AuthenticatedRequest,
+  ) {
+    return this.documentsService.findOne(id, req.user.sub);
   }
 
   /**
@@ -171,9 +231,15 @@ export class DocumentsController {
   addFiles(
     @Param('id', ParseUUIDPipe) id: string,
     @UploadedFiles() files: Express.Multer.File[],
+    @Body() dto: AddFilesDto,
     @Request() req: AuthenticatedRequest,
   ) {
-    return this.documentsService.addFiles(id, req.user.sub, files);
+    return this.documentsService.addFiles(
+      id,
+      req.user.sub,
+      files,
+      dto.staged_file_ids ?? [],
+    );
   }
 
   /**

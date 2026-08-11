@@ -11,7 +11,9 @@ import { Major } from './major.entity';
 import { User } from './user.entity';
 import { Subject } from './subject.entity';
 import { DocumentFile } from './document.entity';
-import { DocumentTag } from './document-tag.entity';
+
+/** One department + year that may see an upload. */
+export type AudienceEntry = { major_id: string; year_level: number };
 
 @Entity('uploads')
 export class Upload {
@@ -42,6 +44,10 @@ export class Upload {
   @Column('text')
   title: string;
 
+  // Optional free-text description (replaced the per-upload tags feature).
+  @Column({ type: 'text', nullable: true })
+  description: string | null;
+
   @Column('text')
   doc_type: string;
 
@@ -54,6 +60,18 @@ export class Upload {
   @Column({ type: 'text', default: 'pending' })
   status: string;
 
+  // Who may see this upload, as explicit (department, year) pairs — see
+  // db/015-upload-audience-pairs.sql. Empty = everyone. Decoupled from the doc's
+  // own major_id/year_level: an uploader may target any set of pairs. Enforced
+  // in the feed/detail queries.
+  @Column({ type: 'jsonb', default: () => "'[]'::jsonb" })
+  audience: AudienceEntry[];
+
+  // Optional soft expiry (see db/009-upload-expiry.sql). Null = never. Once past,
+  // the upload is kept but hidden from everyone except its uploader and admins.
+  @Column({ type: 'timestamptz', nullable: true })
+  expires_at: Date | null;
+
   @Column({ type: 'text', nullable: true })
   rejection_reason: string | null;
 
@@ -65,7 +83,4 @@ export class Upload {
 
   @OneToMany(() => DocumentFile, (doc) => doc.upload)
   documents: DocumentFile[];
-
-  @OneToMany(() => DocumentTag, (tag) => tag.upload)
-  tags: DocumentTag[];
 }

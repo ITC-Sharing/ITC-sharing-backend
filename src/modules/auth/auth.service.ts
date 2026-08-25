@@ -1,4 +1,5 @@
 import {
+  ForbiddenException,
   Injectable,
   BadRequestException,
   InternalServerErrorException,
@@ -112,6 +113,16 @@ export class AuthService {
       throw new UnauthorizedException('Invalid email or password');
     }
 
+    // Checked after the password so a wrong guess can't reveal that an account
+    // exists and is banned.
+    if (user.banned_at) {
+      throw new ForbiddenException(
+        user.ban_reason
+          ? `Your account has been banned: ${user.ban_reason}`
+          : 'Your account has been banned',
+      );
+    }
+
     // Strip the password hash and the loaded major relation from the response;
     // ...safeUser keeps everything else. (ignoreRestSiblings lets these go
     // unused without a lint error.)
@@ -152,10 +163,14 @@ export class AuthService {
 
     const user = await this.users.findOne({
       where: { id: payload.sub },
-      select: { id: true, email: true },
+      select: { id: true, email: true, banned_at: true },
     });
 
     if (!user) throw new UnauthorizedException('User no longer exists');
+    // Banning revokes stored refresh tokens, but check anyway: this is the one
+    // place a long-lived session could otherwise renew itself.
+    if (user.banned_at)
+      throw new ForbiddenException('Your account has been banned');
 
     const accessToken = this.signToken(user.id, user.email);
     const refreshToken = await this.createRefreshToken(user.id);

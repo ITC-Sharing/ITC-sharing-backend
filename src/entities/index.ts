@@ -1,4 +1,5 @@
 export { Major } from './major.entity';
+export { DepartmentModerator } from './department-moderator.entity';
 export { User } from './user.entity';
 export { Subject } from './subject.entity';
 export { Upload } from './upload.entity';

@@ -41,6 +41,16 @@ export class User {
   @Column({ type: 'text', nullable: true })
   avatar_url: string | null;
 
+  /** Set when an admin bans the account; null means active. */
+  @Column({ type: 'timestamptz', nullable: true })
+  banned_at: Date | null;
+
+  @Column({ type: 'text', nullable: true })
+  ban_reason: string | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  banned_by: string | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   created_at: Date;
 }

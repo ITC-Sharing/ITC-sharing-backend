@@ -31,6 +31,9 @@ import { QueryDocumentsDto } from './dto/query-documents.dto';
 // unbounded, and no index can help with that. Matches the DTO's Max(50) ceiling.
 const DEFAULT_PAGE_SIZE = 24;
 
+/** Review state of a single file — see DocumentFile.status. */
+type DocumentStatus = 'pending' | 'active' | 'rejected';
+
 @Injectable()
 export class DocumentsService {
   constructor(
@@ -342,6 +345,7 @@ export class DocumentsService {
     uploadId: string,
     uploaderId: string,
     stagedIds: string[],
+    status: DocumentStatus = 'active',
   ) {
     const unique = [...new Set(stagedIds)];
     const staged = await this.stagedFiles.find({
@@ -360,6 +364,7 @@ export class DocumentsService {
         preview_url: s.preview_url,
         original_name: s.original_name,
         file_size_kb: s.file_size_kb,
+        status,
       });
     });
 
@@ -372,6 +377,7 @@ export class DocumentsService {
       preview_url: d.preview_url,
       original_name: d.original_name,
       file_size_kb: d.file_size_kb,
+      status: d.status,
     }));
   }
 
@@ -441,6 +447,7 @@ export class DocumentsService {
     uploaderId: string,
     majorId: string,
     file: Express.Multer.File,
+    status: DocumentStatus = 'active',
   ) {
     const ext = file.originalname.split('.').pop();
     const baseKey = `${majorId}/${uploaderId}/${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -471,6 +478,7 @@ export class DocumentsService {
           preview_url: previewUrl,
           original_name: file.originalname,
           file_size_kb: Math.round(file.size / 1024),
+          status,
         }),
       );
       return {
@@ -480,6 +488,7 @@ export class DocumentsService {
         preview_url: doc.preview_url,
         original_name: doc.original_name,
         file_size_kb: doc.file_size_kb,
+        status: doc.status,
       };
     } catch {
       await this.storage.remove([
@@ -496,9 +505,18 @@ export class DocumentsService {
     return originalName.replace(/\.[^.]+$/, '');
   }
 
-  // Reshape an Upload entity (+ relations) into the shape the frontend expects,
-  // matching the old Supabase nested-select output.
-  private toFeedShape(u: Upload) {
+  /**
+   * Reshape an Upload entity (+ relations) into the shape the frontend expects,
+   * matching the old Supabase nested-select output.
+   *
+   * `viewer` decides which files come back. A file awaiting review — or turned
+   * down — belongs to its uploader and to admins; nobody else learns it exists.
+   * Pass no viewer where the caller has already filtered in SQL (the feed).
+   */
+  private toFeedShape(
+    u: Upload,
+    viewer?: { id: string; role: string },
+  ) {
     return {
       id: u.id,
       title: u.title,
@@ -521,14 +539,26 @@ export class DocumentsService {
       subjects: u.subject
         ? { id: u.subject.id, name: u.subject.name, acronym: u.subject.acronym }
         : null,
-      documents: (u.documents ?? []).map((d) => ({
+      documents: this.visibleFiles(u, viewer).map((d) => ({
         id: d.id,
         file_url: d.file_url,
         preview_url: d.preview_url,
         file_size_kb: d.file_size_kb,
         original_name: d.original_name,
+        // 'active' for everything the public can see; the uploader also gets
+        // 'pending'/'rejected' rows so the page can mark them.
+        status: d.status,
+        rejection_reason: d.rejection_reason,
       })),
     };
+  }
+
+  /** Files of `u` that `viewer` may see — see toFeedShape. */
+  private visibleFiles(u: Upload, viewer?: { id: string; role: string }) {
+    const files = u.documents ?? [];
+    const privileged =
+      !!viewer && (viewer.id === u.uploader_id || viewer.role === 'admin');
+    return privileged ? files : files.filter((d) => d.status === 'active');
   }
 
   // ─── List ──────────────────────────────────────────────────────────────────
@@ -541,8 +571,20 @@ export class DocumentsService {
       .leftJoinAndSelect('u.uploader', 'uploader')
       .leftJoinAndSelect('u.major', 'major')
       .leftJoinAndSelect('u.subject', 'subject')
-      .leftJoinAndSelect('u.documents', 'documents')
+      // A pending file is invisible in the feed even to its own uploader — the
+      // count on a feed card should say what the public can actually open. The
+      // uploader sees it, marked, on the detail page.
+      .leftJoinAndSelect('u.documents', 'documents', 'documents.status = :ok', {
+        ok: 'active',
+      })
       .where('u.status = :status', { status: 'active' })
+      // Filtered in SQL, not after the fact, so paging stays correct. An upload
+      // reaches zero approved files only if its last approved one was deleted
+      // while a pending file remained; it comes back the moment that file is
+      // cleared. Without this it would list as an empty folder.
+      .andWhere(
+        'exists (select 1 from documents d where d.upload_id = u.id and d.status = :ok)',
+      )
       .orderBy('u.uploaded_at', 'DESC');
 
     // Restrict to uploads this viewer is allowed to see. Listing one's own
@@ -644,7 +686,7 @@ export class DocumentsService {
     if (!this.canView(upload, viewer))
       throw new NotFoundException('Document not found');
 
-    return this.toFeedShape(upload);
+    return this.toFeedShape(upload, viewer);
   }
 
   // ─── Update own upload (metadata only) ──────────────────────────────────────
@@ -753,12 +795,28 @@ export class DocumentsService {
     if (upload.uploader_id !== userId)
       throw new ForbiddenException('Not your upload');
 
+    // A file added to an ALREADY-APPROVED upload has never been reviewed, so it
+    // lands pending and stays hidden from everyone but its uploader. The upload
+    // keeps its own status either way — hiding one new file is what stops an
+    // approved document from leaving the feed over a single attachment.
+    //
+    // On an upload that is still pending or rejected, the files are 'active':
+    // the upload's own review below covers everything in it as a group.
+    const fileStatus: DocumentStatus =
+      upload.status === 'active' ? 'pending' : 'active';
+
     const results: unknown[] = stagedFileIds.length
-      ? await this.claimStagedFiles(uploadId, userId, stagedFileIds)
+      ? await this.claimStagedFiles(uploadId, userId, stagedFileIds, fileStatus)
       : [];
     for (const file of files ?? []) {
       results.push(
-        await this.uploadFile(uploadId, userId, upload.major_id, file),
+        await this.uploadFile(
+          uploadId,
+          userId,
+          upload.major_id,
+          file,
+          fileStatus,
+        ),
       );
     }
 
@@ -770,10 +828,17 @@ export class DocumentsService {
       );
     }
 
-    return { files: results };
+    return { files: results, needs_review: fileStatus === 'pending' };
   }
 
-  /** Remove one file from an upload (uploader only). An upload must keep ≥1 file. */
+  /**
+   * Remove one file from an upload (uploader only).
+   *
+   * Removing the LAST file takes the upload with it: an upload with no files
+   * is a title pointing at nothing — it would still list in the feed and open
+   * to an empty detail page. Callers get `upload_deleted` so they can navigate
+   * away instead of refetching a row that no longer exists.
+   */
   async removeFile(fileId: string, userId: string) {
     const file = await this.documents.findOne({
       where: { id: fileId },
@@ -795,8 +860,16 @@ export class DocumentsService {
       where: { upload_id: file.upload_id },
     });
 
-    if (count <= 1)
-      throw new BadRequestException('An upload must keep at least one file');
+    // Delegated rather than inlined so there is one path that tears an upload
+    // down — it sweeps every object key and lets the FK cascade clear the rows.
+    if (count <= 1) {
+      await this.delete(file.upload_id, userId);
+      return {
+        message: 'Upload deleted',
+        upload_deleted: true,
+        upload_id: file.upload_id,
+      };
+    }
 
     const keys = [file.file_url, file.preview_url]
       .map((url) => this.storage.extractKey(url))
@@ -809,7 +882,11 @@ export class DocumentsService {
       throw new InternalServerErrorException('Failed to remove file');
     }
 
-    return { message: 'File removed' };
+    return {
+      message: 'File removed',
+      upload_deleted: false,
+      upload_id: file.upload_id,
+    };
   }
 
   async delete(uploadId: string, userId: string) {

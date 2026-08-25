@@ -9,7 +9,10 @@ import { ConfigService } from '@nestjs/config';
 
 // Real-time notifications over WebSocket (socket.io).
 @WebSocketGateway({
-  cors: { origin: 'http://localhost:5173', credentials: true },
+  cors: {
+    origin: (process.env.CORS_ORIGIN ?? 'http://localhost:5173').split(','),
+    credentials: true,
+  },
 })
 export class NotificationsGateway implements OnGatewayConnection {
   @WebSocketServer()

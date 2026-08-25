@@ -34,8 +34,7 @@ storage** (MinIO locally). Both are provided by `docker-compose.yml`.
 # 1. Install dependencies
 $ npm install
 
-# 2. Start Postgres + MinIO (schema is auto-created from db/init.sql on first boot,
-#    and the `itc-sharing` storage bucket is created + made public automatically)
+# 2. Start Postgres + MinIO (buckets are created and made public automatically)
 $ docker compose up -d
 
 # 3. Copy env template and adjust if needed
@@ -50,9 +49,88 @@ Configuration lives in `.env`:
 - `DATABASE_URL` — Postgres connection string
 - `S3_ENDPOINT`, `S3_REGION`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_PUBLIC_URL` — object storage
 
-The database schema is owned by [`db/init.sql`](db/init.sql) (TypeORM runs with
-`synchronize: false`). Edit that file to change the schema; recreate the volume
-(`docker compose down -v && docker compose up -d`) to re-apply it from scratch.
+## Database schema
+
+The schema is owned by **TypeORM migrations** in
+[`src/database/migrations`](src/database/migrations) — one per table, ordered by
+foreign-key dependency, each carrying its own indexes. TypeORM runs with
+`synchronize: false` and must never alter the schema on its own.
+
+Pending migrations are applied **at boot** (`migrationsRun` in
+[`src/config/database.config.ts`](src/config/database.config.ts)), so
+`docker compose up` is enough to stand up a brand-new database — there is no
+separate migrate step. They are also available directly:
+
+```bash
+$ npm run migration:show      # what is applied, what is pending
+$ npm run migration:run       # apply pending
+$ npm run migration:revert    # undo the most recent one
+```
+
+To change the schema, add a migration — never edit an applied one:
+
+```bash
+$ npm run migration:create -- src/database/migrations/DescribeTheChange
+```
+
+`src/database/data-source.ts` exists only for that CLI; the running app builds
+its options from `ConfigService` instead.
+
+## First run — seed the database
+
+Migrations create the schema but no data, and `majors` starts empty. That is a
+deadlock on a brand-new database: registration requires a `major_id`, and
+`POST /majors` is admin-only — so with zero majors nobody can sign up, and with
+no users there is no admin to add one.
+
+The seeders break it. Run once, after the migrations:
+
+```bash
+$ npm run seed
+```
+
+That inserts all 13 ITC departments, uploads their logos, and creates one admin
+account. With no
+`SEED_ADMIN_*` variables set it creates `admin@itc.edu.kh` and prints a
+generated password **once** — save it, then change it after first login:
+
+```
+  majors:  +13 inserted, 0 already present (13 total)
+  logos:   13 uploaded, 0 already had one
+  admin:   created admin@itc.edu.kh
+  ┌─────────────────────────────────────────────────────────
+  │ Generated admin password — shown once, save it now:
+  │   Xfg1ye45WpXr5ggGxy8Ijfc1
+  └─────────────────────────────────────────────────────────
+```
+
+To choose the credentials instead, set them in `.env` (see `.env.example`):
+`SEED_ADMIN_EMAIL`, `SEED_ADMIN_PASSWORD`, `SEED_ADMIN_FIRST_NAME`,
+`SEED_ADMIN_LAST_NAME`, `SEED_ADMIN_MAJOR`.
+
+Seeding is **not** wired into application boot, unlike migrations — creating an
+admin account on every container restart is not something a server should do.
+Every seeder is idempotent, so re-running is safe: existing departments are
+skipped, and an existing account is left alone (or promoted to admin if it was
+not already).
+
+In a compiled image there is no ts-node, so run the built file instead:
+
+```bash
+$ node dist/database/seeders/seed
+```
+
+Seed data lives in [`src/database/seeders`](src/database/seeders) — edit
+`majors.seeder.ts` to change the department list.
+
+Department logos are real image files in `seeders/assets`, named after the
+lowercased acronym (`gic.png`). The seeder **uploads the bytes** and stores the
+URL the upload returns, rather than seeding a hardcoded URL — `majors.image_url`
+is absolute and built from `S3_PUBLIC_URL`, so a hardcoded one would point at
+whichever machine it was written on and give every new deployment 13 broken
+images. To add or replace one, drop a file in named for its acronym; a
+department that already has a logo is never overwritten, so a logo changed
+through the admin UI survives re-seeding.
 
 ## Compile and run the project
 

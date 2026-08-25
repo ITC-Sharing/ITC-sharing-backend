@@ -53,6 +53,10 @@ export class Subject {
   @Column({ type: 'timestamptz', nullable: true })
   rejected_at: Date | null;
 
+  /** Who approved or rejected it; null until reviewed. */
+  @Column({ type: 'uuid', nullable: true })
+  reviewed_by: string | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   created_at: Date;
 }

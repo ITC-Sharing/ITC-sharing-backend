@@ -2,7 +2,11 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
+  Param,
+  ParseUUIDPipe,
+  Patch,
   Post,
   UploadedFile,
   UseGuards,
@@ -12,11 +16,34 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import { MajorsService } from './majors.service';
 import { CreateMajorDto } from './dto/create-major.dto';
+import { UpdateMajorDto } from './dto/update-major.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AdminGuard } from '../admin/guards/admin.guard';
 
 const ALLOWED_IMAGE_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB
+
+const IMAGE_UPLOAD_OPTIONS = {
+  storage: memoryStorage(),
+  limits: { fileSize: MAX_IMAGE_SIZE_BYTES },
+  fileFilter: (
+    _req: unknown,
+    file: Express.Multer.File,
+    cb: (error: Error | null, acceptFile: boolean) => void,
+  ) => {
+    if (ALLOWED_IMAGE_MIME_TYPES.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      // A plain Error here surfaces as a 500; this keeps it a 400.
+      cb(
+        new BadRequestException(
+          `Unsupported image type '${file.mimetype}' — use JPEG, PNG or WebP`,
+        ),
+        false,
+      );
+    }
+  },
+};
 
 @Controller('majors')
 export class MajorsController {
@@ -40,29 +67,36 @@ export class MajorsController {
    */
   @UseGuards(JwtAuthGuard, AdminGuard)
   @Post()
-  @UseInterceptors(
-    FileInterceptor('image', {
-      storage: memoryStorage(),
-      limits: { fileSize: MAX_IMAGE_SIZE_BYTES },
-      fileFilter: (_req, file, cb) => {
-        if (ALLOWED_IMAGE_MIME_TYPES.includes(file.mimetype)) {
-          cb(null, true);
-        } else {
-          // A plain Error here surfaces as a 500; this keeps it a 400.
-          cb(
-            new BadRequestException(
-              `Unsupported image type '${file.mimetype}' — use JPEG, PNG or WebP`,
-            ),
-            false,
-          );
-        }
-      },
-    }),
-  )
+  @UseInterceptors(FileInterceptor('image', IMAGE_UPLOAD_OPTIONS))
   create(
     @Body() dto: CreateMajorDto,
     @UploadedFile() image?: Express.Multer.File,
   ) {
     return this.majorsService.create(dto, image);
+  }
+
+  /**
+   * PATCH /majors/:id — rename, re-letter, or replace the logo.
+   * Admin only. Same body/multipart contract as create, all fields optional.
+   */
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  @Patch(':id')
+  @UseInterceptors(FileInterceptor('image', IMAGE_UPLOAD_OPTIONS))
+  update(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateMajorDto,
+    @UploadedFile() image?: Express.Multer.File,
+  ) {
+    return this.majorsService.update(id, dto, image);
+  }
+
+  /**
+   * DELETE /majors/:id — admin only, and refused (409) while the department
+   * still holds subjects, documents or books, which would cascade away with it.
+   */
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  @Delete(':id')
+  remove(@Param('id', ParseUUIDPipe) id: string) {
+    return this.majorsService.remove(id);
   }
 }

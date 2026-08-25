@@ -36,4 +36,21 @@ export class DocumentFile {
 
   @Column({ type: 'int', nullable: true })
   file_size_kb: number | null;
+
+  /**
+   * Review state for THIS file (see the CreateDocuments migration).
+   *
+   * 'active' for files that arrive with a new upload — the upload's own review
+   * covers them. A file added to an already-approved upload lands 'pending' and
+   * is hidden from everyone but its uploader until a moderator clears it, which
+   * leaves the upload and its reviewed files untouched in the feed.
+   */
+  @Column({ type: 'text', default: 'active' })
+  status: string;
+
+  @Column({ type: 'text', nullable: true })
+  rejection_reason: string | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  reviewed_by: string | null;
 }

@@ -72,6 +72,10 @@ export class Upload {
   @Column({ type: 'timestamptz', nullable: true })
   expires_at: Date | null;
 
+  /** Who approved or rejected it; null until reviewed. */
+  @Column({ type: 'uuid', nullable: true })
+  reviewed_by: string | null;
+
   @Column({ type: 'text', nullable: true })
   rejection_reason: string | null;
 

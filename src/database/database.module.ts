@@ -4,8 +4,8 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { databaseConfig } from '../config/database.config';
 
 // Owns the TypeORM root connection so app.module doesn't carry DB wiring.
-// The raw SQL schema/migrations live in backend/db/*.sql and are applied out of
-// band (psql / docker), not through TypeORM — see the project notes.
+// Schema changes are TypeORM migrations in src/database/migrations, applied at
+// boot (migrationsRun) — see config/database.config.ts.
 @Module({
   imports: [
     TypeOrmModule.forRootAsync({

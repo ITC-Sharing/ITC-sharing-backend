@@ -2,11 +2,16 @@ import {
   ConflictException,
   Injectable,
   InternalServerErrorException,
+  NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Major } from '../../entities/major.entity';
+import { Subject } from '../../entities/subject.entity';
+import { Upload } from '../../entities/upload.entity';
+import { Book } from '../../entities/book.entity';
 import { CreateMajorDto } from './dto/create-major.dto';
+import { UpdateMajorDto } from './dto/update-major.dto';
 import { pgCode, errMessage } from '../../common/utils/pg-error';
 import { BUCKETS, StorageService } from '../storage/storage.service';
 
@@ -108,5 +113,95 @@ export class MajorsService {
       acronym: saved.acronym,
       image_url: saved.image_url,
     };
+  }
+
+  async update(id: string, dto: UpdateMajorDto, image?: Express.Multer.File) {
+    const major = await this.majors.findOne({ where: { id } });
+    if (!major) throw new NotFoundException('Major not found');
+
+    const previousImageUrl = major.image_url;
+
+    let uploadedKey: string | null = null;
+    if (image) {
+      uploadedKey = objectKey(image.originalname);
+      try {
+        major.image_url = await this.storage.upload(
+          BUCKETS.MAJORS,
+          uploadedKey,
+          image.buffer,
+          image.mimetype,
+        );
+      } catch (err) {
+        throw new InternalServerErrorException(
+          errMessage(err) || 'Failed to upload major image',
+        );
+      }
+    } else if (dto.image_url !== undefined) {
+      major.image_url = dto.image_url.trim() || null;
+    }
+
+    if (dto.name !== undefined) major.name = dto.name.trim();
+    if (dto.acronym !== undefined) major.acronym = dto.acronym.trim().toUpperCase();
+
+    let saved: Major;
+    try {
+      saved = await this.majors.save(major);
+    } catch (err) {
+      // The row never changed — don't leave the just-uploaded object orphaned.
+      if (uploadedKey) {
+        await this.storage.remove([`${BUCKETS.MAJORS}/${uploadedKey}`]);
+      }
+      if (pgCode(err) === '23505') {
+        throw new ConflictException(`Major '${major.acronym}' already exists`);
+      }
+      throw new InternalServerErrorException('Failed to update major');
+    }
+
+    // The old logo is unreachable once the row points elsewhere.
+    if (uploadedKey && previousImageUrl && previousImageUrl !== saved.image_url) {
+      await this.storage.remove([this.storage.extractKey(previousImageUrl)]);
+    }
+
+    return {
+      id: saved.id,
+      name: saved.name,
+      acronym: saved.acronym,
+      image_url: saved.image_url,
+    };
+  }
+
+  async remove(id: string) {
+    const major = await this.majors.findOne({ where: { id } });
+    if (!major) throw new NotFoundException('Major not found');
+
+    // subjects, uploads and books all cascade from majors, so deleting a
+    // department in use would silently take its content with it. Refuse, and
+    // say what is in the way.
+    const manager = this.majors.manager;
+    const [subjects, uploads, books] = await Promise.all([
+      manager.count(Subject, { where: { major_id: id } }),
+      manager.count(Upload, { where: { major_id: id } }),
+      manager.count(Book, { where: { major_id: id } }),
+    ]);
+
+    if (subjects || uploads || books) {
+      const blocking = [
+        subjects && `${subjects} subject(s)`,
+        uploads && `${uploads} document(s)`,
+        books && `${books} book(s)`,
+      ].filter(Boolean);
+      throw new ConflictException(
+        `'${major.acronym}' still has ${blocking.join(', ')}. Move or delete them first.`,
+      );
+    }
+
+    try {
+      await this.majors.delete(id);
+    } catch {
+      throw new InternalServerErrorException('Failed to delete major');
+    }
+
+    await this.storage.remove([this.storage.extractKey(major.image_url)]);
+    return { id, deleted: true };
   }
 }

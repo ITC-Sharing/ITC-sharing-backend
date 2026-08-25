@@ -244,6 +244,8 @@ export class DocumentsController {
 
   /**
    * DELETE /documents/files/:fileId — remove a single file (uploader only).
+   * Removing the last file deletes the upload too; the response says which
+   * happened via `upload_deleted`.
    */
   @UseGuards(JwtAuthGuard)
   @Delete('files/:fileId')

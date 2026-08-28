@@ -9,3 +9,4 @@ export { Notification } from './notification.entity';
 export { Book } from './book.entity';
 export { BookRequest } from './book-request.entity';
 export { RefreshToken } from './refresh-token.entity';
+export * from './pending-registration.entity';

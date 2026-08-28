@@ -1,7 +1,12 @@
 import { Controller, Post, Body, Req, Res, HttpCode } from '@nestjs/common';
 import type { Request, Response, CookieOptions } from 'express';
 import { AuthService } from './auth.service';
-import { RegisterDto } from './dto/register.dto';
+import {
+  RegisterDto,
+  ResendOtpDto,
+  SetPasswordDto,
+  VerifyOtpDto,
+} from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 
 const REFRESH_COOKIE = 'refresh_token';
@@ -29,9 +34,30 @@ function readRefreshCookie(req: Request): string | undefined {
 export class AuthController {
   constructor(private authService: AuthService) {}
 
+  /** Step 1 — details in, 6-digit code emailed. Creates no account. */
   @Post('register')
   register(@Body() dto: RegisterDto) {
     return this.authService.register(dto);
+  }
+
+  /** Step 2 — check the code. Still creates no account. */
+  @Post('register/verify')
+  @HttpCode(200)
+  verifyOtp(@Body() dto: VerifyOtpDto) {
+    return this.authService.verifyOtp(dto);
+  }
+
+  /** Step 3 — set the password; this is what creates the account. */
+  @Post('register/password')
+  setPassword(@Body() dto: SetPasswordDto) {
+    return this.authService.completeRegistration(dto);
+  }
+
+  /** Issue a fresh code (rate limited). */
+  @Post('register/resend')
+  @HttpCode(200)
+  resendOtp(@Body() dto: ResendOtpDto) {
+    return this.authService.resendOtp(dto);
   }
 
   @Post('login')

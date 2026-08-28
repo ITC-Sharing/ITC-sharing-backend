@@ -5,6 +5,7 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import configuration from './config/configuration';
 import { validateEnv } from './config/validation';
+import { MailModule } from './modules/mail/mail.module';
 import { DatabaseModule } from './database/database.module';
 import { StorageModule } from './modules/storage/storage.module';
 import { AuthModule } from './modules/auth/auth.module';
@@ -27,6 +28,7 @@ import { TransformInterceptor } from './common/interceptors/transform.intercepto
       validate: validateEnv,
     }),
     DatabaseModule,
+    MailModule,
     StorageModule,
     AuthModule,
     UsersModule,

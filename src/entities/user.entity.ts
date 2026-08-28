@@ -38,6 +38,14 @@ export class User {
   @Column({ type: 'int', nullable: true })
   year_level: number | null;
 
+  /**
+   * Institute student ID (e.g. e20200123), which the account's email is derived
+   * from at registration. Null for accounts created before this existed, and
+   * for the seeded admin, who is not a student.
+   */
+  @Column({ type: 'text', nullable: true })
+  student_id: string | null;
+
   @Column({ type: 'text', nullable: true })
   avatar_url: string | null;
 

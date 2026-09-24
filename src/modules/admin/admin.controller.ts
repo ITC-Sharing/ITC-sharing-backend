@@ -7,31 +7,69 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Put,
   Query,
   Request,
   UseGuards,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AdminGuard } from './guards/admin.guard';
-import { ReviewerGuard } from './guards/reviewer.guard';
 // `import type` because it appears in decorated signatures: with
 // emitDecoratorMetadata a value import would be emitted and fail at runtime.
 import type { ReviewerRequest } from './guards/reviewer.guard';
 import { AdminService } from './admin.service';
+import { PromotionSettingsService } from '../settings/promotion-settings.service';
+import { SetPromotionDto } from './dto/set-promotion.dto';
 import { ModerationService } from './moderation.service';
 import { EditSubjectDto } from './dto/edit-subject.dto';
-import { BanUserDto, SetUserRoleDto } from './dto/user-admin.dto';
+import {
+  BanUserDto,
+  SetUserPlacementDto,
+  SetUserRoleDto,
+} from './dto/user-admin.dto';
+import { SetBookHiddenDto } from './dto/book-admin.dto';
+import { RateLimitTier } from '../../common/rate-limit/rate-limit.decorator';
 
-// Admin-only by default. The review routes below swap AdminGuard for
-// ReviewerGuard so department moderators reach them too — each of those then
-// checks the department of the resource itself, not just the role.
+// Admin-only, without exception — the class guard is the whole boundary.
+//
+// The review queue lives in ModerationController, which department moderators
+// can reach. It is a separate class on purpose: Nest guards accumulate, so a
+// per-route @UseGuards(ReviewerGuard) here would ADD to AdminGuard rather than
+// replace it, and moderators would keep being rejected by a rule nobody meant
+// to apply to them.
 @Controller('admin')
 @UseGuards(JwtAuthGuard, AdminGuard)
 export class AdminController {
   constructor(
     private readonly adminService: AdminService,
     private readonly moderation: ModerationService,
+    private readonly promotionSettings: PromotionSettingsService,
   ) {}
+
+  // ── Promotion schedule ────────────────────────────────────────────────
+  // When the whole institute moves up a year. Admin-only: it changes every
+  // student's year level, which decides what they can see.
+
+  /** GET /admin/promotion — the scheduled rollover, if any. */
+  @Get('promotion')
+  getPromotionSchedule() {
+    return this.promotionSettings.get();
+  }
+
+  /**
+   * PUT /admin/promotion — body: { rollover_at: string | null }
+   *
+   * An ISO instant schedules one rollover; null clears it. Students advance
+   * lazily, on their next visit after the moment passes, so nothing happens on
+   * the stroke of the clock and nobody is missed for being away.
+   */
+  @Put('promotion')
+  setPromotionSchedule(
+    @Request() req: ReviewerRequest,
+    @Body() dto: SetPromotionDto,
+  ) {
+    return this.promotionSettings.set(dto.rollover_at ?? null, req.user!.sub!);
+  }
 
   /** GET /admin/stats */
   @Get('stats')
@@ -46,19 +84,14 @@ export class AdminController {
   }
 
   /** GET /admin/users?search= */
+  @RateLimitTier('search')
   @Get('users')
   getAllUsers(@Query('search') search?: string) {
     return this.adminService.getAllUsers(search);
   }
 
-  /** GET /admin/pending/subjects */
-  @Get('pending/subjects')
-  @UseGuards(ReviewerGuard)
-  getPendingSubjects(@Request() req: ReviewerRequest) {
-    return this.adminService.getPendingSubjects(req.reviewer!);
-  }
-
   /** GET /admin/subjects?search=&major_id=&status= */
+  @RateLimitTier('search')
   @Get('subjects')
   getAllSubjects(
     @Query('search') search?: string,
@@ -83,88 +116,30 @@ export class AdminController {
     return this.adminService.removeSubject(id);
   }
 
-  /** PATCH /admin/subjects/:id/approve */
-  @Patch('subjects/:id/approve')
-  @UseGuards(ReviewerGuard)
-  approveSubject(
+  // ─── Books (admin only) ──────────────────────────────────────────────────
+  // No approval step: books go live on donation. These exist to correct a
+  // status or remove a listing.
+
+  /** GET /admin/books?search= */
+  @RateLimitTier('search')
+  @Get('books')
+  getAllBooks(@Query('search') search?: string) {
+    return this.adminService.getAllBooks(search);
+  }
+
+  /** PATCH /admin/books/:id/hidden — body: { hidden: boolean } */
+  @Patch('books/:id/hidden')
+  setBookHidden(
     @Param('id', ParseUUIDPipe) id: string,
-    @Request() req: ReviewerRequest,
+    @Body() dto: SetBookHiddenDto,
   ) {
-    return this.adminService.approveSubject(id, req.reviewer!);
+    return this.adminService.setBookHidden(id, dto.hidden);
   }
 
-  /** PATCH /admin/subjects/:id/reject */
-  @Patch('subjects/:id/reject')
-  @UseGuards(ReviewerGuard)
-  rejectSubject(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Request() req: ReviewerRequest,
-    @Body('reason') reason?: string,
-  ) {
-    return this.adminService.rejectSubject(id, req.reviewer!, reason);
-  }
-
-  /** GET /admin/pending/documents */
-  @Get('pending/documents')
-  @UseGuards(ReviewerGuard)
-  getPendingDocuments(@Request() req: ReviewerRequest) {
-    return this.adminService.getPendingDocuments(req.reviewer!);
-  }
-
-  /** GET /admin/documents/group/:groupId */
-  @Get('documents/group/:groupId')
-  getDocumentsByGroup(@Param('groupId', ParseUUIDPipe) groupId: string) {
-    return this.adminService.getDocumentsByGroup(groupId);
-  }
-
-  /** PATCH /admin/documents/group/:groupId/approve */
-  @Patch('documents/group/:groupId/approve')
-  @UseGuards(ReviewerGuard)
-  approveDocumentGroup(
-    @Param('groupId', ParseUUIDPipe) groupId: string,
-    @Request() req: ReviewerRequest,
-  ) {
-    return this.adminService.approveDocumentGroup(groupId, req.reviewer!);
-  }
-
-  /** PATCH /admin/documents/group/:groupId/reject */
-  @Patch('documents/group/:groupId/reject')
-  @UseGuards(ReviewerGuard)
-  rejectDocumentGroup(
-    @Param('groupId', ParseUUIDPipe) groupId: string,
-    @Request() req: ReviewerRequest,
-    @Body('reason') reason?: string,
-  ) {
-    return this.adminService.rejectDocumentGroup(
-      groupId,
-      req.reviewer!,
-      reason,
-    );
-  }
-
-  /**
-   * PATCH /admin/documents/files/:fileId/approve — clear a single file added
-   * to an upload that is already approved. Its upload never left the feed, so
-   * there is no group to act on.
-   */
-  @Patch('documents/files/:fileId/approve')
-  @UseGuards(ReviewerGuard)
-  approveFile(
-    @Param('fileId', ParseUUIDPipe) fileId: string,
-    @Request() req: ReviewerRequest,
-  ) {
-    return this.adminService.approveFile(fileId, req.reviewer!);
-  }
-
-  /** PATCH /admin/documents/files/:fileId/reject */
-  @Patch('documents/files/:fileId/reject')
-  @UseGuards(ReviewerGuard)
-  rejectFile(
-    @Param('fileId', ParseUUIDPipe) fileId: string,
-    @Request() req: ReviewerRequest,
-    @Body('reason') reason?: string,
-  ) {
-    return this.adminService.rejectFile(fileId, req.reviewer!, reason);
+  /** DELETE /admin/books/:id */
+  @Delete('books/:id')
+  deleteBook(@Param('id', ParseUUIDPipe) id: string) {
+    return this.adminService.deleteBook(id);
   }
 
   // ─── Users (admin only) ──────────────────────────────────────────────────
@@ -177,6 +152,15 @@ export class AdminController {
     @Request() req: ReviewerRequest,
   ) {
     return this.adminService.setUserRole(id, dto.role, req.user!.sub!);
+  }
+
+  /** PATCH /admin/users/:id/placement — body: { major_id, year_level } */
+  @Patch('users/:id/placement')
+  setUserPlacement(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SetUserPlacementDto,
+  ) {
+    return this.adminService.setUserPlacement(id, dto.major_id, dto.year_level);
   }
 
   /** PATCH /admin/users/:id/ban — body: { reason? } */
@@ -222,6 +206,18 @@ export class AdminController {
   }
 
   /**
+   * DELETE /admin/users/:id/moderator — strip every department at once.
+   *
+   * The per-department picker is for adjusting who covers what; this is for
+   * "they are not a moderator any more", which otherwise meant unticking each
+   * department in turn and hoping none was missed.
+   */
+  @Delete('users/:id/moderator')
+  removeAllModeratorAccess(@Param('id', ParseUUIDPipe) id: string) {
+    return this.moderation.unassignAllFor(id);
+  }
+
+  /**
    * GET /admin/majors/without-moderator — departments nobody reviews yet.
    * Not an error state (admins can still review them), a prompt for the
    * dashboard.
@@ -232,6 +228,7 @@ export class AdminController {
   }
 
   /** GET /admin/documents?search=&doc_type=&major_id=&uploader_id=&since= */
+  @RateLimitTier('search')
   @Get('documents')
   getAllDocuments(
     @Query('search') search?: string,

@@ -13,7 +13,7 @@ import {
   Matches,
   ValidateNested,
 } from 'class-validator';
-import { IsFutureDate } from '../../../common/validators/is-future-date';
+import { IsFutureDate } from '../validators/is-future-date';
 import { AudienceEntryDto } from './audience-entry.dto';
 
 // Multipart form-data can't carry a JSON array, so array fields are sent as a
@@ -114,9 +114,13 @@ export class CreateDocumentDto {
   @IsUUID()
   major_id: string;
 
-  @IsOptional()
+  // Required: every document belongs to a subject. The upload form marks the
+  // field with an asterisk and the feed groups by it, but this used to be
+  // optional, so a department/year with no subjects yet could post one with no
+  // subject at all. UpdateDocumentDto keeps its own optional copy — a metadata
+  // edit may leave the subject alone.
   @IsUUID()
-  subject_id?: string;
+  subject_id: string;
 
   // Optional free-text description (replaced tags).
   @IsOptional()

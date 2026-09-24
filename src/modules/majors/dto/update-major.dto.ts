@@ -1,4 +1,10 @@
-import { IsString, MaxLength, IsUrl, IsOptional, Matches } from 'class-validator';
+import {
+  IsString,
+  MaxLength,
+  IsUrl,
+  IsOptional,
+  Matches,
+} from 'class-validator';
 import { MAJOR_ACRONYM_PATTERN, MAJOR_NAME_PATTERN } from './create-major.dto';
 
 /**

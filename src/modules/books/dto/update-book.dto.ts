@@ -1,5 +1,7 @@
 import {
+  IsNotEmpty,
   IsOptional,
+  ValidateIf,
   IsString,
   IsUUID,
   MaxLength,
@@ -21,7 +23,9 @@ export class UpdateBookDto {
   })
   title?: string;
 
+  /** '' clears it — the "Other" choice. */
   @IsOptional()
+  @ValidateIf((o: UpdateBookDto) => o.department !== '')
   @IsUUID('4', { message: 'Department must be a valid selection' })
   department?: string;
 
@@ -31,14 +35,10 @@ export class UpdateBookDto {
   @Matches(NO_FORBIDDEN_PATTERN, { message: FORBIDDEN_MESSAGE })
   description?: string;
 
+  /** Omit to keep the current cover; a book is never without one. */
   @IsOptional()
   @IsString()
-  @MaxLength(200)
-  @Matches(NO_FORBIDDEN_PATTERN, { message: FORBIDDEN_MESSAGE })
-  contact?: string;
-
-  @IsOptional()
-  @IsString()
+  @IsNotEmpty({ message: 'Cover image is required' })
   @MaxLength(2000)
   cover_image_url?: string;
 }

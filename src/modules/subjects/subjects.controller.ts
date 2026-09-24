@@ -20,6 +20,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { SubjectsService } from './subjects.service';
 import { CreateSubjectDto } from './dto/create-subject.dto';
 import { UpdateSubjectDto } from './dto/update-subject.dto';
+import { RateLimitTier } from '../../common/rate-limit/rate-limit.decorator';
 
 type AuthenticatedRequest = { user: { sub: string; email: string } };
 
@@ -44,6 +45,7 @@ export class SubjectsController {
    * GET /subjects?major_id=<uuid>
    * Public — used to populate subject dropdowns filtered by major
    */
+  @RateLimitTier('search')
   @Get()
   findByMajor(
     @Query('major_id') majorId: string,

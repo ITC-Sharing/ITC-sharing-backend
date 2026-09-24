@@ -1,22 +1,28 @@
 import {
+  BadRequestException,
+  ForbiddenException,
+  HttpException,
+  HttpStatus,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
-  ForbiddenException,
-  BadRequestException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, LessThan, Repository } from 'typeorm';
-import { AudienceEntry, Upload } from '../../entities/upload.entity';
-import { DocumentFile } from '../../entities/document.entity';
-import { StagedFile } from '../../entities/staged-file.entity';
-import { User } from '../../entities/user.entity';
-import { Major } from '../../entities/major.entity';
+import { In, IsNull, LessThan, Repository } from 'typeorm';
+import { AudienceEntry, Upload } from './entities/upload.entity';
+import { DocumentFile } from './entities/document.entity';
+import { UploadPin } from './entities/upload-pin.entity';
+import { StagedFile } from './entities/staged-file.entity';
+import { User } from '../users/entities/user.entity';
+import { Major } from '../majors/entities/major.entity';
 import { BUCKETS, StorageService } from '../storage/storage.service';
 import { OfficeConvertService } from '../storage/office-convert.service';
 import { pgCode } from '../../common/utils/pg-error';
-import { LANGUAGE_MAJOR_ACRONYMS } from '../../common/constants/majors';
-import { yearLevelsForMajor } from '../../common/utils/year-levels';
+import { LANGUAGE_MAJOR_ACRONYMS } from './constants/majors';
+import { decodeUploadName } from './utils/upload-name';
+import { yearLevelsForMajor } from './utils/year-levels';
 import {
   CreateDocumentDto,
   DEPARTMENT_DOC_TYPES,
@@ -25,6 +31,16 @@ import {
 } from './dto/create-document.dto';
 import { UpdateDocumentDto } from './dto/update-document.dto';
 import { QueryDocumentsDto } from './dto/query-documents.dto';
+import { NotificationsService } from '../notifications/notifications.service';
+import { ImageOptimizeService } from '../storage/image-optimize.service';
+import { UploadQuotaService } from '../../common/rate-limit/upload-quota.service';
+import { ClamAvService } from '../../common/security/clamav.service';
+import {
+  isProcessableImage,
+  validateFileContent,
+  type ValidationOutcome,
+} from './utils/file-signature';
+import { randomUUID } from 'crypto';
 
 // Applied when a caller omits `limit`. Without it the feed returned every
 // matching upload joined to its uploader, major, subject, tags and files —
@@ -45,11 +61,156 @@ export class DocumentsService {
     private readonly stagedFiles: Repository<StagedFile>,
     @InjectRepository(User)
     private readonly users: Repository<User>,
+    private readonly notifications: NotificationsService,
     @InjectRepository(Major)
     private readonly majors: Repository<Major>,
+    @InjectRepository(UploadPin)
+    private readonly uploadPins: Repository<UploadPin>,
     private readonly storage: StorageService,
     private readonly officeConvert: OfficeConvertService,
+    private readonly images: ImageOptimizeService,
+    private readonly quota: UploadQuotaService,
+    private readonly clamav: ClamAvService,
   ) {}
+
+  private readonly securityLog = new Logger('UploadSecurity');
+
+  /**
+   * Confirm a file is what it claims to be, and bound it if it is an image.
+   *
+   * Runs before anything is written, so a rejected file never reaches storage.
+   * The client is told only that the file was unsupported — the detected type
+   * and the reason go to the log, where they are useful, rather than to the
+   * uploader, who would use them to find what does get through.
+   */
+  private async vetFile(
+    uploaderId: string,
+    originalName: string,
+    file: Express.Multer.File,
+  ): Promise<{ buffer: Buffer; contentType: string }> {
+    const verdict: ValidationOutcome = validateFileContent(
+      originalName,
+      file.buffer,
+    );
+
+    if (!verdict.ok) {
+      this.logRejection(uploaderId, file, verdict);
+      throw new BadRequestException('Unsupported or invalid file type.');
+    }
+
+    // Scanned here: after the bytes are confirmed to be a type we accept, and
+    // before anything is written or re-encoded. The ORIGINAL buffer is what
+    // goes to clamd — that is what the uploader sent, and for everything except
+    // images it is also exactly what will be stored.
+    const scan = await this.clamav.scan(file.buffer);
+
+    if (scan.status === 'infected') {
+      this.securityLog.warn(
+        `upload rejected user=${uploaderId} size=${file.size} ` +
+          `declared=${file.mimetype} reason=malware signature=${scan.signature}`,
+      );
+      // The signature name stays in the log. Telling an uploader which rule
+      // fired is a tuning hint for anyone probing the scanner, and means
+      // nothing to a student who picked the wrong file.
+      throw new BadRequestException(
+        'This file was rejected by the malware scanner.',
+      );
+    }
+
+    if (scan.status === 'unavailable') {
+      // Fail closed. An unscanned upload would be indistinguishable from a
+      // scanned one once stored, so "the scanner was down" must not quietly
+      // become "the file is fine". The operator sees this at ERROR; the
+      // uploader sees a retryable 503.
+      this.securityLog.error(
+        `upload refused user=${uploaderId} size=${file.size} ` +
+          `reason=scanner-unavailable detail=${scan.reason}`,
+      );
+      throw new ServiceUnavailableException(
+        'File scanning is temporarily unavailable. Please try again shortly.',
+      );
+    }
+
+    if (isProcessableImage(verdict.kind)) {
+      const optimized = await this.images.optimizeOrOriginal(
+        file.buffer,
+        verdict.kind as 'jpeg' | 'png',
+      );
+      if (optimized) {
+        return { buffer: optimized.buffer, contentType: optimized.contentType };
+      }
+    }
+
+    // Everything else is stored byte-for-byte. A student's PDF must come back
+    // exactly as submitted; the detected MIME is used rather than the declared
+    // one so the stored object's Content-Type reflects the actual bytes.
+    return {
+      buffer: file.buffer,
+      contentType: verdict.detectedMime ?? 'application/octet-stream',
+    };
+  }
+
+  /**
+   * One line per refused upload: who, how big, what they said it was, what it
+   * actually was, and why it was refused. No filename, no bytes, no token.
+   */
+  private logRejection(
+    uploaderId: string,
+    file: Express.Multer.File,
+    verdict: ValidationOutcome,
+  ) {
+    this.securityLog.warn(
+      `upload rejected user=${uploaderId} size=${file.size} ` +
+        `declared=${file.mimetype} detected=${verdict.detectedMime ?? 'none'} ` +
+        `reason=${verdict.reason ?? 'unknown'}`,
+    );
+  }
+
+  /**
+   * Reserve quota for a batch, or refuse it.
+   *
+   * Throws the 429 with Retry-After the spec calls for. Reserved up front so a
+   * batch is accepted or rejected as a whole, and refunded by the caller if the
+   * write then fails.
+   */
+  private async reserveQuota(uploaderId: string, bytes: number) {
+    const decision = await this.quota.consume(uploaderId, bytes);
+    if (!decision.allowed) {
+      this.securityLog.warn(
+        `upload quota exceeded user=${uploaderId} requested=${bytes} ` +
+          `remaining=${decision.remaining} limit=${decision.limit}`,
+      );
+      throw new HttpException(
+        {
+          success: false,
+          message: 'Upload quota exceeded. Try again later.',
+          statusCode: HttpStatus.TOO_MANY_REQUESTS,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+        // Surfaced as a header by the filter below; also in the body for
+        // clients that cannot read headers cross-origin.
+        { cause: { retryAfter: decision.retryAfterSeconds } },
+      );
+    }
+    return decision;
+  }
+
+  /**
+   * A storage key that carries no user input.
+   *
+   * Was `${Date.now()}-${Math.random()}`: guessable, and it ended in the
+   * uploader's own filename. A v4 UUID has 122 bits of CSPRNG entropy and
+   * nothing of the original name — which now lives only in `original_name`.
+   */
+  private buildKey(prefix: string, ext: string | null): string {
+    const safeExt = (ext ?? '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '')
+      .slice(0, 8);
+    return safeExt
+      ? `${prefix}/${randomUUID()}.${safeExt}`
+      : `${prefix}/${randomUUID()}`;
+  }
 
   /**
    * Restrict a feed query to uploads the viewer is allowed to see. A viewer
@@ -60,7 +221,12 @@ export class DocumentsService {
    */
   private applyVisibility(
     qb: import('typeorm').SelectQueryBuilder<Upload>,
-    viewer: { id: string; role: string; major_id: string | null; year_level: number | null },
+    viewer: {
+      id: string;
+      role: string;
+      major_id: string | null;
+      year_level: number | null;
+    },
     // When true (the owner listing their own uploads — the dashboard), expired
     // uploads are kept. In the browse feed it's false, so expiry hides a doc
     // from EVERYONE including its uploader; the owner only sees it again in the
@@ -71,10 +237,14 @@ export class DocumentsService {
     // unless includeExpired (the owner's own-docs dashboard listing).
     const notExpired =
       '(:includeExpired OR u.expires_at IS NULL OR u.expires_at > now())';
+    // Hiding is the uploader's own switch, so it behaves like expiry: gone from
+    // the feed for everyone, still listed when they browse their own uploads.
+    const notHidden = '(:includeExpired OR u.hidden_at IS NULL)';
 
     if (viewer.role === 'admin') {
       // Admins bypass the audience restriction (for moderation) but not expiry.
       qb.andWhere(notExpired, { includeExpired });
+      qb.andWhere(notHidden, { includeExpired });
       return;
     }
 
@@ -85,6 +255,7 @@ export class DocumentsService {
     qb.andWhere(
       `(
         ${notExpired}
+        AND ${notHidden}
         AND (
           u.uploader_id = :viewerId
           OR jsonb_array_length(u.audience) = 0
@@ -109,12 +280,20 @@ export class DocumentsService {
   /** True if `viewer` may see an already-loaded upload (detail endpoint). */
   private canView(
     upload: Upload,
-    viewer: { id: string; role: string; major_id: string | null; year_level: number | null },
+    viewer: {
+      id: string;
+      role: string;
+      major_id: string | null;
+      year_level: number | null;
+    },
   ): boolean {
     if (viewer.role === 'admin') return true;
     if (upload.uploader_id === viewer.id) return true;
     // Expired uploads are hidden from everyone but the uploader/admins.
-    if (upload.expires_at && new Date(upload.expires_at) <= new Date()) return false;
+    if (upload.expires_at && new Date(upload.expires_at) <= new Date())
+      return false;
+    // Same for hidden ones — the two early returns above keep owner/admin access.
+    if (upload.hidden_at) return false;
     const audience = upload.audience ?? [];
     if (!audience.length) return true; // no restriction
     return audience.some(
@@ -221,10 +400,11 @@ export class DocumentsService {
    * still succeeds.
    */
   private async buildPreview(baseKey: string, file: Express.Multer.File) {
-    if (!this.officeConvert.canConvert(file.originalname))
+    const sourceName = decodeUploadName(file.originalname);
+    if (!this.officeConvert.canConvert(sourceName))
       return { url: null, key: null };
 
-    const pdf = await this.officeConvert.toPdf(file.buffer, file.originalname);
+    const pdf = await this.officeConvert.toPdf(file.buffer, sourceName);
     if (!pdf) return { url: null, key: null };
 
     const key = `${baseKey}.preview.pdf`;
@@ -254,19 +434,42 @@ export class DocumentsService {
     // it only touches this user's rows.
     await this.purgeStaleStaged(uploaderId);
 
-    const ext = file.originalname.split('.').pop();
-    const baseKey = `staged/${uploaderId}/${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const key = `${baseKey}.${ext}`;
+    const originalName = decodeUploadName(file.originalname);
+
+    // Charged against the bytes RECEIVED, not the bytes kept, and charged
+    // before anything expensive happens. Sharp can shrink a 20 MB photo to
+    // 200 KB, so billing the stored size would leave the exact abuse this
+    // exists for — pushing volume at the server — effectively unbounded.
+    // Reserving first also means a refusal costs no decode. A file rejected
+    // by vetting stays charged on purpose: otherwise invalid bytes would be
+    // free to send without limit.
+    const ingressBytes = file.buffer?.length ?? file.size ?? 0;
+    await this.reserveQuota(uploaderId, ingressBytes);
+
+    // The bytes decide what this is, and an image is bounded here — both before
+    // anything is written, so a refusal costs no storage.
+    const { buffer, contentType } = await this.vetFile(
+      uploaderId,
+      originalName,
+      file,
+    );
+
+    const ext = originalName.includes('.')
+      ? originalName.split('.').pop()!
+      : null;
+    const key = this.buildKey(`staged/${uploaderId}`, ext);
+    const baseKey = key.replace(/\.[^.]*$/, '');
 
     let fileUrl: string;
     try {
       fileUrl = await this.storage.upload(
         BUCKETS.DOCUMENTS,
         key,
-        file.buffer,
-        file.mimetype,
+        buffer,
+        contentType,
       );
     } catch {
+      await this.quota.refund(uploaderId, ingressBytes);
       throw new InternalServerErrorException('File upload failed');
     }
 
@@ -280,21 +483,45 @@ export class DocumentsService {
           storage_key: key,
           preview_url: preview.url,
           preview_key: preview.key,
-          original_name: file.originalname,
-          file_size_kb: Math.round(file.size / 1024),
+          original_name: originalName,
+          // The stored size, not the uploaded one — they differ once an image
+          // has been re-encoded, and every consumer wants what is on disk.
+          file_size_kb: Math.round(buffer.length / 1024),
         }),
       );
       return {
         id: staged.id,
-        file_url: staged.file_url,
-        preview_url: staged.preview_url,
+        // Signed like every other document URL: the upload form shows the
+        // staged file back as a thumbnail, and the bucket is private, so the
+        // stored URL would 403. The caller is the uploader by construction.
+        //
+        // Inline only for images, and only because Sharp re-encoded them —
+        // those bytes are ours. Anything else keeps the attachment default,
+        // so a staged PDF cannot be made to render on the storage origin.
+        file_url: await this.signOrFallback(
+          `${BUCKETS.DOCUMENTS}/${staged.storage_key}`,
+          staged.file_url,
+          staged.original_name,
+          /\.(jpe?g|png)$/i.test(staged.storage_key ?? ''),
+        ),
+        preview_url: staged.preview_key
+          ? await this.signOrFallback(
+              `${BUCKETS.DOCUMENTS}/${staged.preview_key}`,
+              staged.preview_url,
+              staged.original_name,
+              true,
+            )
+          : staged.preview_url,
         original_name: staged.original_name,
         file_size_kb: staged.file_size_kb,
       };
     } catch {
+      // Row failed: take the objects back out and return the budget, so a
+      // failed stage leaves neither an orphan nor a spent quota.
       await this.storage.remove(
         this.stagedObjectPaths({ storage_key: key, preview_key: preview.key }),
       );
+      await this.quota.refund(uploaderId, ingressBytes);
       throw new InternalServerErrorException('Failed to stage file');
     }
   }
@@ -361,6 +588,14 @@ export class DocumentsService {
       return this.documents.create({
         upload_id: uploadId,
         file_url: s.file_url,
+        // Qualified with the bucket on the way across: staged_files stores a
+        // BARE key (stagedObjectPaths prepends the bucket), while documents
+        // stores a full "<bucket>/<key>" ref. Copying verbatim would write an
+        // unresolvable ref and every staged upload would fail to download.
+        storage_key: `${BUCKETS.DOCUMENTS}/${s.storage_key}`,
+        preview_key: s.preview_key
+          ? `${BUCKETS.DOCUMENTS}/${s.preview_key}`
+          : null,
         preview_url: s.preview_url,
         original_name: s.original_name,
         file_size_kb: s.file_size_kb,
@@ -370,15 +605,29 @@ export class DocumentsService {
 
     const saved = await this.documents.save(rows);
     await this.stagedFiles.delete(unique);
-    return saved.map((d) => ({
-      id: d.id,
-      upload_id: d.upload_id,
-      file_url: d.file_url,
-      preview_url: d.preview_url,
-      original_name: d.original_name,
-      file_size_kb: d.file_size_kb,
-      status: d.status,
-    }));
+    // Signed on the way out, like every other read: the bucket is private, so
+    // the stored URL would 403 if the caller used it. The caller is the
+    // uploader by construction here.
+    return Promise.all(
+      saved.map(async (d) => ({
+        id: d.id,
+        upload_id: d.upload_id,
+        file_url: await this.signOrFallback(
+          d.storage_key,
+          d.file_url,
+          d.original_name,
+        ),
+        preview_url: await this.signOrFallback(
+          d.preview_key,
+          d.preview_url,
+          d.original_name,
+          true,
+        ),
+        original_name: d.original_name,
+        file_size_kb: d.file_size_kb,
+        status: d.status,
+      })),
+    );
   }
 
   // ─── Upload ────────────────────────────────────────────────────────────────
@@ -398,9 +647,9 @@ export class DocumentsService {
     const audience = await this.resolveAudience(major, dto.audience ?? []);
 
     const firstName =
-      files?.[0]?.originalname ??
-      (await this.stagedFiles.findOne({ where: { id: stagedIds[0] } }))
-        ?.original_name ??
+      (decodeUploadName(files?.[0]?.originalname) ||
+        (await this.stagedFiles.findOne({ where: { id: stagedIds[0] } }))
+          ?.original_name) ??
       'Untitled';
     const title = this.resolveTitle(dto.title, firstName);
 
@@ -439,6 +688,33 @@ export class DocumentsService {
       );
     }
 
+    /**
+     * Tell the people who have to review it.
+     *
+     * Last, and not awaited for its result: the upload is already saved and the
+     * student is waiting on this response. A reviewer who is not told still has
+     * the queue in front of them; a student who sees an error because a
+     * notification failed has lost their upload for no reason.
+     */
+    const uploader = await this.users.findOne({
+      where: { id: uploaderId },
+      select: { first_name: true, last_name: true },
+    });
+    const uploaderName =
+      `${uploader?.first_name ?? ''} ${uploader?.last_name ?? ''}`.trim() ||
+      'A student';
+
+    void this.notifications.createForReviewers({
+      major_id: dto.major_id,
+      type: 'document_pending',
+      message: `${uploaderName} submitted "${title}" for review.`,
+      key: 'documentPending',
+      params: { name: uploaderName, title },
+      ref_id: upload.id,
+      ref_type: 'upload',
+      except_user_id: uploaderId,
+    });
+
     return { upload_id: upload.id, files: fileResults };
   }
 
@@ -449,19 +725,36 @@ export class DocumentsService {
     file: Express.Multer.File,
     status: DocumentStatus = 'active',
   ) {
-    const ext = file.originalname.split('.').pop();
-    const baseKey = `${majorId}/${uploaderId}/${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const key = `${baseKey}.${ext}`;
+    const originalName = decodeUploadName(file.originalname);
+
+    // Ingress bytes, reserved before the decode — see stageFile.
+    const ingressBytes = file.buffer?.length ?? file.size ?? 0;
+    await this.reserveQuota(uploaderId, ingressBytes);
+
+    // Same gate as the staged path — this endpoint accepts files directly, so
+    // it cannot rely on staging having vetted them.
+    const { buffer, contentType } = await this.vetFile(
+      uploaderId,
+      originalName,
+      file,
+    );
+
+    const ext = originalName.includes('.')
+      ? originalName.split('.').pop()!
+      : null;
+    const key = this.buildKey(`${majorId}/${uploaderId}`, ext);
+    const baseKey = key.replace(/\.[^.]*$/, '');
 
     let fileUrl: string;
     try {
       fileUrl = await this.storage.upload(
         BUCKETS.DOCUMENTS,
         key,
-        file.buffer,
-        file.mimetype,
+        buffer,
+        contentType,
       );
     } catch {
+      await this.quota.refund(uploaderId, ingressBytes);
       throw new InternalServerErrorException('File upload failed');
     }
 
@@ -475,17 +768,31 @@ export class DocumentsService {
         this.documents.create({
           upload_id: uploadId,
           file_url: fileUrl,
+          // The canonical refs. file_url stays for legacy readers; everything
+          // that grants access reads these.
+          storage_key: `${BUCKETS.DOCUMENTS}/${key}`,
+          preview_key: previewKey ? `${BUCKETS.DOCUMENTS}/${previewKey}` : null,
           preview_url: previewUrl,
-          original_name: file.originalname,
-          file_size_kb: Math.round(file.size / 1024),
+          original_name: originalName,
+          file_size_kb: Math.round(buffer.length / 1024),
           status,
         }),
       );
+      // Signed on the way out — see claimStagedFiles.
       return {
         id: doc.id,
         upload_id: doc.upload_id,
-        file_url: doc.file_url,
-        preview_url: doc.preview_url,
+        file_url: await this.signOrFallback(
+          doc.storage_key,
+          doc.file_url,
+          doc.original_name,
+        ),
+        preview_url: await this.signOrFallback(
+          doc.preview_key,
+          doc.preview_url,
+          doc.original_name,
+          true,
+        ),
         original_name: doc.original_name,
         file_size_kb: doc.file_size_kb,
         status: doc.status,
@@ -495,8 +802,93 @@ export class DocumentsService {
         `${BUCKETS.DOCUMENTS}/${key}`,
         ...(previewKey ? [`${BUCKETS.DOCUMENTS}/${previewKey}`] : []),
       ]);
+      await this.quota.refund(uploaderId, ingressBytes);
       throw new InternalServerErrorException('Failed to save document record');
     }
+  }
+
+  // ─── Authorised file access ───────────────────────────────────────────────
+
+  /**
+   * Mint a short-lived URL for one file, or refuse.
+   *
+   * This is the ONLY way a document object is reachable now that the bucket is
+   * private, which makes it the single place the audience rules have to hold.
+   * The order below is deliberate and load-bearing:
+   *
+   *   load the file → load its upload → authorise → THEN sign
+   *
+   * Signing before authorising would mint a working URL for a caller about to
+   * be refused, and a URL is a bearer token: once created it cannot be recalled
+   * for its lifetime. Nothing in this method talks to storage until every check
+   * has passed.
+   *
+   * Refusals are 404, not 403 — matching findOne(), so that asking about a
+   * document you may not see cannot confirm it exists.
+   */
+  async signFileAccess(
+    fileId: string,
+    viewerId: string,
+    variant: 'download' | 'preview',
+  ): Promise<{
+    url: string;
+    expires_in: number;
+    original_name: string | null;
+  }> {
+    const file = await this.documents.findOne({
+      where: { id: fileId },
+      relations: { upload: true },
+    });
+    if (!file) throw new NotFoundException('File not found');
+
+    const upload = file.upload;
+    if (!upload) throw new NotFoundException('File not found');
+
+    const viewer = await this.getViewer(viewerId);
+
+    // 1. May this viewer see the parent upload at all? Audience, expiry and
+    //    hidden state all live in canView, reused rather than restated.
+    if (!this.canView(upload, viewer))
+      throw new NotFoundException('File not found');
+
+    // 2. Is the upload itself published? A pending or rejected upload belongs
+    //    to its uploader and to admins until a moderator clears it.
+    const isOwner = upload.uploader_id === viewer.id;
+    const isAdmin = viewer.role === 'admin';
+    if (upload.status !== 'active' && !isOwner && !isAdmin) {
+      throw new NotFoundException('File not found');
+    }
+
+    // 3. And this individual file — one added to an approved upload is pending
+    //    on its own, and a hidden file is the uploader's business only.
+    if ((file.status !== 'active' || file.hidden_at) && !isOwner && !isAdmin) {
+      throw new NotFoundException('File not found');
+    }
+
+    const ref = variant === 'preview' ? file.preview_key : file.storage_key;
+    if (!ref) {
+      // A row written before the backfill, or an office file with no preview.
+      throw new NotFoundException(
+        variant === 'preview' ? 'No preview for this file' : 'File not found',
+      );
+    }
+
+    // Only now does storage get involved.
+    const url = await this.storage.signedUrlForRef(ref, {
+      downloadName: file.original_name,
+      // A preview is a PDF this server generated, so it is safe to show in
+      // place. An original is whatever a student uploaded and is always an
+      // attachment — an inline HTML or SVG would otherwise run as a page.
+      inline: variant === 'preview',
+    });
+
+    if (!url) throw new NotFoundException('File not found');
+
+    return {
+      url,
+      expires_in: this.storage.signedUrlTtl,
+      original_name: file.original_name,
+    };
   }
 
   private resolveTitle(title: string | undefined, originalName: string) {
@@ -513,10 +905,7 @@ export class DocumentsService {
    * down — belongs to its uploader and to admins; nobody else learns it exists.
    * Pass no viewer where the caller has already filtered in SQL (the feed).
    */
-  private toFeedShape(
-    u: Upload,
-    viewer?: { id: string; role: string },
-  ) {
+  private async toFeedShape(u: Upload, viewer?: { id: string; role: string }) {
     return {
       id: u.id,
       title: u.title,
@@ -527,6 +916,16 @@ export class DocumentsService {
       audience: u.audience ?? [],
       expires_at: u.expires_at,
       uploaded_at: u.uploaded_at,
+      // Always 'active' in the public feed, which filters on it. Meaningful
+      // only when listing your own uploads with ?status=… — see findAll.
+      status: u.status,
+      /** Non-null when the uploader has hidden it. Only they and admins see it. */
+      hidden_at: u.hidden_at,
+      /**
+       * Non-null when THIS viewer has pinned it. Queries join `pins` filtered
+       * to the viewer, so there is at most one — nobody sees another's pin.
+       */
+      pinned_at: u.pins?.[0]?.pinned_at ?? null,
       users: u.uploader
         ? {
             id: u.uploader.id,
@@ -537,20 +936,70 @@ export class DocumentsService {
         : null,
       majors: u.major ? { id: u.major.id, acronym: u.major.acronym } : null,
       subjects: u.subject
-        ? { id: u.subject.id, name: u.subject.name, acronym: u.subject.acronym }
+        ? {
+            id: u.subject.id,
+            name: u.subject.name,
+            acronym: u.subject.acronym,
+            semester: u.subject.semester,
+          }
         : null,
-      documents: this.visibleFiles(u, viewer).map((d) => ({
-        id: d.id,
-        file_url: d.file_url,
-        preview_url: d.preview_url,
-        file_size_kb: d.file_size_kb,
-        original_name: d.original_name,
-        // 'active' for everything the public can see; the uploader also gets
-        // 'pending'/'rejected' rows so the page can mark them.
-        status: d.status,
-        rejection_reason: d.rejection_reason,
-      })),
+      documents: await Promise.all(
+        this.visibleFiles(u, viewer).map(async (d) => ({
+          id: d.id,
+          // Signed here rather than stored: the bucket is private, so a URL is a
+          // short-lived grant rather than an address. This row has already been
+          // through the audience filter, so signing it is authorised by the same
+          // decision that returned it. Presigning is a local HMAC — no network —
+          // so a page of two dozen files costs microseconds.
+          //
+          // Click-to-download uses GET /documents/files/:id/download instead: it
+          // re-authorises, mints a fresh URL, and sets Content-Disposition.
+          file_url: await this.signOrFallback(
+            d.storage_key,
+            d.file_url,
+            d.original_name,
+          ),
+          preview_url: await this.signOrFallback(
+            d.preview_key,
+            d.preview_url,
+            d.original_name,
+            true,
+          ),
+          file_size_kb: d.file_size_kb,
+          original_name: d.original_name,
+          // 'active' for everything the public can see; the uploader also gets
+          // 'pending'/'rejected' rows so the page can mark them.
+          status: d.status,
+          rejection_reason: d.rejection_reason,
+          /** Non-null when the uploader has hidden this file specifically. */
+          hidden_at: d.hidden_at,
+        })),
+      ),
     };
+  }
+
+  /**
+   * A usable URL for an object, preferring the canonical key.
+   *
+   * Rows written before the storage-key migration have only a legacy URL. That
+   * URL stops working the moment the bucket goes private, so it is returned
+   * only as a last resort — and the backfill in DocumentStorageKeys means it
+   * should never be reached for a document.
+   */
+  private async signOrFallback(
+    ref: string | null,
+    legacyUrl: string | null,
+    downloadName: string | null,
+    inline = false,
+  ): Promise<string | null> {
+    if (ref) {
+      const signed = await this.storage.signedUrlForRef(ref, {
+        downloadName,
+        inline,
+      });
+      if (signed) return signed;
+    }
+    return legacyUrl;
   }
 
   /** Files of `u` that `viewer` may see — see toFeedShape. */
@@ -558,13 +1007,18 @@ export class DocumentsService {
     const files = u.documents ?? [];
     const privileged =
       !!viewer && (viewer.id === u.uploader_id || viewer.role === 'admin');
-    return privileged ? files : files.filter((d) => d.status === 'active');
+    return privileged
+      ? files
+      : files.filter((d) => d.status === 'active' && !d.hidden_at);
   }
 
   // ─── List ──────────────────────────────────────────────────────────────────
 
   async findAll(query: QueryDocumentsDto, viewerId: string) {
     const viewer = await this.getViewer(viewerId);
+    // Listing your own uploads unlocks the non-active statuses (and, below,
+    // expired ones): it is your record of what you posted, not a public feed.
+    const ownList = !!query.uploader_id && query.uploader_id === viewerId;
 
     const qb = this.uploads
       .createQueryBuilder('u')
@@ -574,23 +1028,67 @@ export class DocumentsService {
       // A pending file is invisible in the feed even to its own uploader — the
       // count on a feed card should say what the public can actually open. The
       // uploader sees it, marked, on the detail page.
-      .leftJoinAndSelect('u.documents', 'documents', 'documents.status = :ok', {
-        ok: 'active',
-      })
-      .where('u.status = :status', { status: 'active' })
+      .leftJoinAndSelect(
+        'u.documents',
+        'documents',
+        'documents.status = :ok AND documents.hidden_at IS NULL',
+        { ok: 'active' },
+      )
+      // Non-active statuses are only honoured when you are listing your OWN
+      // uploads. Otherwise `?status=pending` would expose every unreviewed
+      // upload in the institute to anyone who guessed the parameter.
+      //
+      // On your own list, NO status means every status — your dashboard's "All
+      // statuses" filter sends nothing, and defaulting to 'active' there hid
+      // your own pending and rejected uploads from the one screen that exists
+      // to show you what happened to them.
+      .where(
+        ownList && !query.status
+          ? 'u.status IN (:...statuses)'
+          : 'u.status = :status',
+        ownList && !query.status
+          ? { statuses: ['active', 'pending', 'rejected'] }
+          : { status: ownList ? query.status : 'active' },
+      )
       // Filtered in SQL, not after the fact, so paging stays correct. An upload
       // reaches zero approved files only if its last approved one was deleted
       // while a pending file remained; it comes back the moment that file is
       // cleared. Without this it would list as an empty folder.
       .andWhere(
-        'exists (select 1 from documents d where d.upload_id = u.id and d.status = :ok)',
+        'exists (select 1 from documents d where d.upload_id = u.id and d.status = :ok and d.hidden_at is null)',
       )
+      // Filtered to the viewer, so it can only ever attach their own pin: the
+      // join both feeds `pinned_at` back to the client and drives the sort.
+      .leftJoinAndSelect('u.pins', 'pin', 'pin.user_id = :viewerId', {
+        viewerId,
+      })
       .orderBy('u.uploaded_at', 'DESC');
 
     // Restrict to uploads this viewer is allowed to see. Listing one's own
     // uploads (uploader_id === viewer, the dashboard) keeps expired docs; the
     // browse feed hides them from everyone, uploader included.
-    const includeExpired = !!query.uploader_id && query.uploader_id === viewerId;
+    const includeExpired = ownList;
+
+    // Your pins lead every listing you look at — the feed, a subject page.
+    // Because the join is filtered to you, this reorders nothing for anyone
+    // else: two people opening the same subject see the same documents in the
+    // order each of them chose.
+    //
+    // orderBy(), not addOrderBy(): the builder already sorts by uploaded_at, and
+    // appending would leave the pin as a tie-breaker that never breaks a tie.
+    //
+    // ?sort=date opts out. The owner's dashboard is a record of what they
+    // uploaded and when, and a pinned row jumping to the top of it makes the
+    // date column look unsorted. The pin JOIN stays either way — it also feeds
+    // `pinned_at` back to the client for the pin/unpin menu.
+    if (query.sort === 'date') {
+      qb.orderBy('u.uploaded_at', 'DESC');
+    } else {
+      qb.orderBy('pin.pinned_at', 'DESC', 'NULLS LAST').addOrderBy(
+        'u.uploaded_at',
+        'DESC',
+      );
+    }
     this.applyVisibility(qb, viewer, includeExpired);
 
     if (query.major_id)
@@ -599,6 +1097,16 @@ export class DocumentsService {
       qb.andWhere('u.subject_id = :subject_id', {
         subject_id: query.subject_id,
       });
+    // Only meaningful on your own list; applyVisibility already hides other
+    // people's hidden uploads outright.
+    if (query.hidden === 'true' && query.uploader_id === viewerId)
+      qb.andWhere('u.hidden_at IS NOT NULL');
+
+    // Same gate, same reason. Only reachable on the owner's own list, which is
+    // also the only listing that returns expired uploads in the first place.
+    if (query.expired === 'true' && query.uploader_id === viewerId)
+      qb.andWhere('u.expires_at IS NOT NULL AND u.expires_at <= now()');
+
     if (query.doc_type)
       qb.andWhere('u.doc_type = :doc_type', { doc_type: query.doc_type });
     if (query.year_level)
@@ -630,7 +1138,7 @@ export class DocumentsService {
     try {
       const [rows, total] = await qb.getManyAndCount();
       return {
-        items: rows.map((u) => this.toFeedShape(u)),
+        items: await Promise.all(rows.map((u) => this.toFeedShape(u))),
         total,
         page,
         limit,
@@ -674,6 +1182,9 @@ export class DocumentsService {
       .leftJoinAndSelect('u.major', 'major')
       .leftJoinAndSelect('u.subject', 'subject')
       .leftJoinAndSelect('u.documents', 'documents')
+      .leftJoinAndSelect('u.pins', 'pin', 'pin.user_id = :viewerId', {
+        viewerId,
+      })
       .where('u.id = :id', { id: uploadId })
       .andWhere('u.status = :status', { status: 'active' })
       .getOne();
@@ -686,7 +1197,7 @@ export class DocumentsService {
     if (!this.canView(upload, viewer))
       throw new NotFoundException('Document not found');
 
-    return this.toFeedShape(upload, viewer);
+    return await this.toFeedShape(upload, viewer);
   }
 
   // ─── Update own upload (metadata only) ──────────────────────────────────────
@@ -889,6 +1400,122 @@ export class DocumentsService {
     };
   }
 
+  /**
+   * Hide or show one file (uploader only).
+   *
+   * Hiding the LAST visible file hides its upload too: a folder with nothing
+   * visible in it is a title pointing at nothing, which is the same reason
+   * `removeFile` deletes an upload when its last file goes.
+   *
+   * Showing a file again reverses that — a visible file inside a hidden folder
+   * would still be unreachable, so the folder comes back with it. `upload_hidden`
+   * in the reply tells the caller which way the folder moved.
+   */
+  async setFileHidden(fileId: string, userId: string, hidden: boolean) {
+    const file = await this.documents.findOne({
+      where: { id: fileId },
+      select: { id: true, upload_id: true },
+    });
+    if (!file) throw new NotFoundException('File not found');
+
+    const upload = await this.uploads.findOne({
+      where: { id: file.upload_id },
+      select: { id: true, uploader_id: true, hidden_at: true },
+    });
+    if (!upload) throw new NotFoundException('Upload not found');
+    if (upload.uploader_id !== userId)
+      throw new ForbiddenException('Not your upload');
+
+    await this.documents.update(
+      { id: fileId },
+      { hidden_at: hidden ? new Date() : null },
+    );
+
+    // Counted AFTER the update so it reflects the state we just wrote.
+    const visible = await this.documents.count({
+      where: { upload_id: file.upload_id, hidden_at: IsNull() },
+    });
+
+    let uploadHidden = !!upload.hidden_at;
+    if (hidden && visible === 0 && !upload.hidden_at) {
+      await this.uploads.update(
+        { id: file.upload_id },
+        { hidden_at: new Date() },
+      );
+      uploadHidden = true;
+    } else if (!hidden && visible > 0 && upload.hidden_at) {
+      await this.uploads.update({ id: file.upload_id }, { hidden_at: null });
+      uploadHidden = false;
+    }
+
+    return {
+      message: hidden ? 'File hidden' : 'File visible',
+      hidden,
+      upload_hidden: uploadHidden,
+      upload_id: file.upload_id,
+    };
+  }
+
+  /**
+   * Pin or unpin a document for yourself. Any document you can open may be
+   * pinned, not just your own — the pin is a bookmark on your copy of the
+   * listing and is invisible to everyone else.
+   *
+   * Gated on canView rather than ownership, so pinning can't be used to probe
+   * for restricted or hidden uploads: what you can't read, you can't pin.
+   */
+  async setPinned(uploadId: string, userId: string, pinned: boolean) {
+    const upload = await this.uploads.findOne({ where: { id: uploadId } });
+
+    // 404 rather than 403 for an upload outside your audience, matching
+    // findOne — a pin must not reveal that a document exists.
+    if (!upload || upload.status !== 'active')
+      throw new NotFoundException('Upload not found');
+
+    const viewer = await this.getViewer(userId);
+    if (!this.canView(upload, viewer))
+      throw new NotFoundException('Upload not found');
+
+    if (pinned) {
+      // Re-pinning an already-pinned document is a no-op rather than an error,
+      // so a double click can't 500.
+      await this.uploadPins
+        .createQueryBuilder()
+        .insert()
+        .values({ user_id: userId, upload_id: uploadId })
+        .orIgnore()
+        .execute();
+    } else {
+      await this.uploadPins.delete({ user_id: userId, upload_id: uploadId });
+    }
+
+    return { message: pinned ? 'Upload pinned' : 'Upload unpinned', pinned };
+  }
+
+  /**
+   * Take a document out of circulation, or put it back. Uploader only.
+   *
+   * Separate from `delete` (nothing is removed) and from `update` (this does
+   * not re-open review — a hidden document keeps whatever status it had).
+   */
+  async setHidden(uploadId: string, userId: string, hidden: boolean) {
+    const upload = await this.uploads.findOne({
+      where: { id: uploadId },
+      select: { id: true, uploader_id: true },
+    });
+
+    if (!upload) throw new NotFoundException('Upload not found');
+    if (upload.uploader_id !== userId)
+      throw new ForbiddenException('Not your upload');
+
+    await this.uploads.update(
+      { id: uploadId },
+      { hidden_at: hidden ? new Date() : null },
+    );
+
+    return { message: hidden ? 'Upload hidden' : 'Upload visible', hidden };
+  }
+
   async delete(uploadId: string, userId: string) {
     const upload = await this.uploads.findOne({
       where: { id: uploadId },
@@ -956,7 +1583,13 @@ export class DocumentsService {
       // saved over the top of the real value.
       audience: u.audience ?? [],
       expires_at: u.expires_at,
-      subjects: u.subject ? { id: u.subject.id, name: u.subject.name } : null,
+      subjects: u.subject
+        ? {
+            id: u.subject.id,
+            name: u.subject.name,
+            semester: u.subject.semester,
+          }
+        : null,
       majors: u.major ? { id: u.major.id, acronym: u.major.acronym } : null,
       documents: (u.documents ?? []).map((d) => ({
         id: d.id,

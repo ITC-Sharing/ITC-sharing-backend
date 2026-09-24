@@ -45,10 +45,7 @@ export class OfficeConvertService {
    * Convert an office file buffer to a PDF buffer. Returns null if conversion
    * is unavailable or fails — callers treat that as "no preview rendition".
    */
-  async toPdf(
-    input: Buffer,
-    originalName: string,
-  ): Promise<Buffer | null> {
+  async toPdf(input: Buffer, originalName: string): Promise<Buffer | null> {
     if (!this.canConvert(originalName)) return null;
 
     // LibreOffice works on files, not stdin — stage the input in an isolated

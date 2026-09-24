@@ -3,16 +3,31 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { DocumentsService } from './documents.service';
 import { DocumentsController } from './documents.controller';
 import { MulterModule } from '@nestjs/platform-express';
-import { Upload } from '../../entities/upload.entity';
-import { DocumentFile } from '../../entities/document.entity';
-import { User } from '../../entities/user.entity';
-import { Major } from '../../entities/major.entity';
-import { StagedFile } from '../../entities/staged-file.entity';
+import { Upload } from './entities/upload.entity';
+import { DocumentFile } from './entities/document.entity';
+import { User } from '../users/entities/user.entity';
+import { Major } from '../majors/entities/major.entity';
+import { StagedFile } from './entities/staged-file.entity';
+import { UploadPin } from './entities/upload-pin.entity';
+import { NotificationsModule } from '../notifications/notifications.module';
+import { RateLimitModule } from '../../common/rate-limit/rate-limit.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Upload, DocumentFile, User, Major, StagedFile]),
+    TypeOrmModule.forFeature([
+      Upload,
+      DocumentFile,
+      User,
+      Major,
+      StagedFile,
+      UploadPin,
+    ]),
     MulterModule.register({ storage: undefined }),
+    // Reviewers are told when an upload enters their queue.
+    NotificationsModule,
+    // For the per-user upload byte budget. StorageModule is @Global, so
+    // StorageService and ImageOptimizeService need no import here.
+    RateLimitModule,
   ],
   controllers: [DocumentsController],
   providers: [DocumentsService],

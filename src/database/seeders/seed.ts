@@ -2,21 +2,24 @@ import 'dotenv/config';
 import dataSource from '../data-source';
 import { seedMajors } from './majors.seeder';
 import { seedMajorLogos } from './logos.seeder';
-import { seedAdmin } from './admin.seeder';
 
 /**
  * Seed entry point — `npm run seed`.
  *
  * Deliberately NOT wired into application boot, unlike migrations. Migrations
- * are structure and must run everywhere; seed data is a judgement call, and
- * silently creating an admin account every time a container restarts is not a
- * thing a server should do. You run this once, by hand, on a new database.
+ * are structure and must run everywhere; seed data is a judgement call. You run
+ * this once, by hand, on a new database.
  *
  * Every seeder is idempotent, so re-running is safe if you are unsure whether
  * it took the first time.
  *
- * Order matters: logos attach to departments and the admin is attached to one
- * too, so majors go first.
+ * Order matters: logos attach to departments, so majors go first.
+ *
+ * NOTE: this no longer creates an admin account. A fresh database has no admin
+ * and no way to make one through the API — every route that grants the role is
+ * itself behind AdminGuard. Promote a registered account directly:
+ *
+ *   update users set role = 'admin' where email = 'you@itc.edu.kh';
  */
 async function run(): Promise<void> {
   await dataSource.initialize();
@@ -25,7 +28,6 @@ async function run(): Promise<void> {
   try {
     await seedMajors(dataSource);
     await seedMajorLogos(dataSource);
-    await seedAdmin(dataSource);
   } finally {
     await dataSource.destroy();
   }

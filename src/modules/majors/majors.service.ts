@@ -6,10 +6,10 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { Major } from '../../entities/major.entity';
-import { Subject } from '../../entities/subject.entity';
-import { Upload } from '../../entities/upload.entity';
-import { Book } from '../../entities/book.entity';
+import { Major } from './entities/major.entity';
+import { Subject } from '../subjects/entities/subject.entity';
+import { Upload } from '../documents/entities/upload.entity';
+import { Book } from '../books/entities/book.entity';
 import { CreateMajorDto } from './dto/create-major.dto';
 import { UpdateMajorDto } from './dto/update-major.dto';
 import { pgCode, errMessage } from '../../common/utils/pg-error';
@@ -141,7 +141,8 @@ export class MajorsService {
     }
 
     if (dto.name !== undefined) major.name = dto.name.trim();
-    if (dto.acronym !== undefined) major.acronym = dto.acronym.trim().toUpperCase();
+    if (dto.acronym !== undefined)
+      major.acronym = dto.acronym.trim().toUpperCase();
 
     let saved: Major;
     try {
@@ -158,7 +159,11 @@ export class MajorsService {
     }
 
     // The old logo is unreachable once the row points elsewhere.
-    if (uploadedKey && previousImageUrl && previousImageUrl !== saved.image_url) {
+    if (
+      uploadedKey &&
+      previousImageUrl &&
+      previousImageUrl !== saved.image_url
+    ) {
       await this.storage.remove([this.storage.extractKey(previousImageUrl)]);
     }
 

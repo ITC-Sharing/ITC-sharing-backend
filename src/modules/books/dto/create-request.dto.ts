@@ -5,9 +5,4 @@ export class CreateRequestDto {
   @IsNotEmpty({ message: 'Message is required' })
   @MaxLength(500)
   message!: string;
-
-  @IsString()
-  @IsNotEmpty({ message: 'Contact is required so the donor can reach you' })
-  @MaxLength(200)
-  contact!: string;
 }

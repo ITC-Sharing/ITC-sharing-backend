@@ -1,6 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import { TypeOrmModuleOptions } from '@nestjs/typeorm';
-import * as entities from '../entities';
+import * as entities from '../database/entities';
 import { join } from 'path';
 
 // TypeORM connection options built from the environment. The schema is owned by

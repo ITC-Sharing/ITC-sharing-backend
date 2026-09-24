@@ -6,15 +6,20 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
-import { User } from '../../entities/user.entity';
-import { Upload } from '../../entities/upload.entity';
-import { DocumentFile } from '../../entities/document.entity';
-import { Subject } from '../../entities/subject.entity';
-import { RefreshToken } from '../../entities/refresh-token.entity';
-import { Book } from '../../entities/book.entity';
+import { User } from '../users/entities/user.entity';
+import { Upload } from '../documents/entities/upload.entity';
+import { DocumentFile } from '../documents/entities/document.entity';
+import { Subject } from '../subjects/entities/subject.entity';
+import { RefreshToken } from '../auth/entities/refresh-token.entity';
+import { Book } from '../books/entities/book.entity';
+import { BookRequest } from '../books/entities/book-request.entity';
+import { Notification } from '../notifications/entities/notification.entity';
+import { Major } from '../majors/entities/major.entity';
+import { yearLevelsForMajor } from '../documents/utils/year-levels';
 import { StorageService } from '../storage/storage.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ModerationService, Reviewer } from './moderation.service';
+import { PromotionSettingsService } from '../settings/promotion-settings.service';
 
 const SUBJECT_STATUSES = ['active', 'pending', 'rejected'];
 const UUID_PATTERN =
@@ -35,9 +40,16 @@ export class AdminService {
     private readonly refreshTokens: Repository<RefreshToken>,
     @InjectRepository(Book)
     private readonly books: Repository<Book>,
+    @InjectRepository(Major)
+    private readonly majors: Repository<Major>,
+    @InjectRepository(BookRequest)
+    private readonly bookRequests: Repository<BookRequest>,
+    @InjectRepository(Notification)
+    private readonly notificationsRepo: Repository<Notification>,
     private readonly storage: StorageService,
     private readonly notificationsService: NotificationsService,
     private readonly moderation: ModerationService,
+    private readonly promotionSettings: PromotionSettingsService,
   ) {}
 
   /**
@@ -234,30 +246,49 @@ export class AdminService {
       throw new InternalServerErrorException('Failed to fetch documents');
     }
 
-    return rows.map((u) => ({
-      id: u.id,
-      title: u.title,
-      doc_type: u.doc_type,
-      uploaded_at: u.uploaded_at,
-      users: u.uploader
-        ? {
-            id: u.uploader.id,
-            first_name: u.uploader.first_name,
-            last_name: u.uploader.last_name,
-          }
-        : null,
-      majors: u.major ? { id: u.major.id, acronym: u.major.acronym } : null,
-      subjects: u.subject ? { id: u.subject.id, name: u.subject.name } : null,
-      description: u.description,
-      documents: (u.documents ?? []).map((d) => ({
-        id: d.id,
-        file_url: d.file_url,
-        original_name: d.original_name,
-        file_size_kb: d.file_size_kb,
-        // The expanded row previews office files through their PDF rendition.
-        preview_url: d.preview_url,
+    // Signed here, not returned raw: the `documents` bucket is private, so the
+    // stored URL would 403 in the admin table. Same treatment as every other
+    // list — see signRef.
+    return Promise.all(
+      rows.map(async (u) => ({
+        id: u.id,
+        title: u.title,
+        doc_type: u.doc_type,
+        uploaded_at: u.uploaded_at,
+        users: u.uploader
+          ? {
+              id: u.uploader.id,
+              first_name: u.uploader.first_name,
+              last_name: u.uploader.last_name,
+            }
+          : null,
+        majors: u.major ? { id: u.major.id, acronym: u.major.acronym } : null,
+        /** The cohort the upload is for; the table shows it as "I3-GIC". */
+        year_level: u.year_level,
+        subjects: u.subject ? { id: u.subject.id, name: u.subject.name } : null,
+        description: u.description,
+        documents: await Promise.all(
+          (u.documents ?? []).map(async (d) => ({
+            id: d.id,
+            file_url: await this.signRef(
+              d.storage_key,
+              d.file_url,
+              d.original_name,
+            ),
+            original_name: d.original_name,
+            file_size_kb: d.file_size_kb,
+            // The expanded row previews office files through their PDF
+            // rendition — ours, so it may render in place.
+            preview_url: await this.signRef(
+              d.preview_key,
+              d.preview_url,
+              d.original_name,
+              true,
+            ),
+          })),
+        ),
       })),
-    }));
+    );
   }
 
   // ─── User administration ───────────────────────────────────────────────────
@@ -271,6 +302,127 @@ export class AdminService {
    * Two self-inflicted lockouts are refused: demoting yourself, and demoting the
    * last admin. Either would leave nobody able to promote anyone back.
    */
+  // ─── Books (admin only) ──────────────────────────────────────────────────
+  // Books are never reviewed — a donation goes live immediately. Admins get
+  // this listing to correct a status or take a listing down, not to approve.
+
+  /**
+   * Every book, newest first, with its donor and whether a request is open.
+   *
+   * `open_requests` matters because "requesting" is not a stored status: a book
+   * someone has asked for is still 'available' in the row, and the count is the
+   * only way to see it here.
+   */
+  async getAllBooks(search?: string) {
+    const qb = this.books
+      .createQueryBuilder('b')
+      .leftJoinAndSelect('b.donor', 'donor')
+      .leftJoinAndSelect('b.major', 'major')
+      .orderBy('b.created_at', 'DESC');
+
+    if (search?.trim()) {
+      qb.where(
+        '(b.title ILIKE :q OR donor.first_name ILIKE :q OR donor.last_name ILIKE :q OR donor.email ILIKE :q)',
+        { q: `%${search.trim()}%` },
+      );
+    }
+
+    const books = await qb.getMany();
+    if (!books.length) return [];
+
+    const open = await this.bookRequests
+      .createQueryBuilder('r')
+      .select('r.book_id', 'book_id')
+      .addSelect('count(*)', 'count')
+      .where('r.book_id IN (:...ids)', { ids: books.map((b) => b.id) })
+      .andWhere('r.status IN (:...statuses)', {
+        statuses: ['pending', 'accepted'],
+      })
+      .groupBy('r.book_id')
+      .getRawMany<{ book_id: string; count: string }>();
+
+    const openByBook = new Map(open.map((r) => [r.book_id, Number(r.count)]));
+
+    return books.map((b) => ({
+      id: b.id,
+      title: b.title,
+      status: b.status,
+      hidden_at: b.hidden_at,
+      cover_image_url: b.cover_image_url,
+      created_at: b.created_at,
+      open_requests: openByBook.get(b.id) ?? 0,
+      major: b.major ? { id: b.major.id, acronym: b.major.acronym } : null,
+      donor: b.donor
+        ? {
+            id: b.donor.id,
+            first_name: b.donor.first_name,
+            last_name: b.donor.last_name,
+            email: b.donor.email,
+          }
+        : null,
+    }));
+  }
+
+  /**
+   * Take a listing out of circulation, or put it back.
+   *
+   * The row is untouched otherwise: the donor keeps seeing it in "My books"
+   * (marked hidden), so their book does not silently vanish, but it is gone
+   * from the public list and its detail page 404s.
+   */
+  async setBookHidden(bookId: string, hidden: boolean) {
+    const book = await this.books.findOne({
+      where: { id: bookId },
+      select: { id: true },
+    });
+    if (!book) throw new NotFoundException('Book not found');
+
+    await this.books.update(
+      { id: bookId },
+      { hidden_at: hidden ? new Date() : null },
+    );
+    return { message: hidden ? 'Book hidden' : 'Book visible', hidden };
+  }
+
+  /**
+   * Remove a book outright.
+   *
+   * Unlike the donor's own delete, this is not blocked by an open request or by
+   * the book already being donated — it exists precisely for the listings a
+   * donor cannot clean up themselves.
+   */
+  async deleteBook(bookId: string) {
+    const book = await this.books.findOne({
+      where: { id: bookId },
+      select: { id: true, cover_image_url: true },
+    });
+    if (!book) throw new NotFoundException('Book not found');
+
+    // Requests cascade with the book, but notifications pointing at them do
+    // not — left behind they become links that 404 when a recipient opens them.
+    const reqs = await this.bookRequests.find({
+      where: { book_id: bookId },
+      select: { id: true },
+    });
+    if (reqs.length) {
+      await this.notificationsRepo.delete({
+        ref_type: 'book_request',
+        ref_id: In(reqs.map((r) => r.id)),
+      });
+    }
+
+    const key = this.storage.extractKey(book.cover_image_url);
+    if (key) await this.storage.remove([key]);
+
+    try {
+      await this.books.delete({ id: bookId });
+    } catch {
+      throw new InternalServerErrorException('Failed to delete book');
+    }
+
+    return { message: 'Book deleted' };
+  }
+
   async setUserRole(targetId: string, role: 'user' | 'admin', actorId: string) {
     if (targetId === actorId && role !== 'admin') {
       throw new BadRequestException('You cannot demote yourself');
@@ -298,6 +450,7 @@ export class AdminService {
         role === 'admin'
           ? 'You are now an administrator.'
           : 'Your administrator access has been removed.',
+      key: role === 'admin' ? 'roleAdminGranted' : 'roleAdminRemoved',
       ref_id: targetId,
       ref_type: 'user',
     });
@@ -345,6 +498,63 @@ export class AdminService {
     return { message: 'User banned' };
   }
 
+  /**
+   * Correct a student's department and year.
+   *
+   * Admin-only by design: the pair decides which documents they can see, so
+   * PATCH /users/me refuses it once a profile is set. Placement is the
+   * institute's call, and this is where a mistake gets fixed.
+   *
+   * Also settles any pending rollover — an admin placing someone into a
+   * department has answered the question the prompt would ask.
+   */
+  async setUserPlacement(targetId: string, majorId: string, yearLevel: number) {
+    const target = await this.users.findOne({
+      where: { id: targetId },
+      select: { id: true },
+    });
+    if (!target) throw new NotFoundException('User not found');
+
+    const major = await this.majors.findOne({ where: { id: majorId } });
+    if (!major) throw new BadRequestException('Unknown department');
+
+    // A GIC year 1 or a TC year 4 matches no upload's audience, so the student
+    // would silently see nothing. Reject rather than store it.
+    const allowed = yearLevelsForMajor(major.acronym);
+    if (!allowed.includes(yearLevel))
+      throw new BadRequestException(
+        `${major.acronym} has years ${allowed.join(', ')} — not ${yearLevel}`,
+      );
+
+    await this.users.update(
+      { id: targetId },
+      {
+        major_id: majorId,
+        year_level: yearLevel,
+        // An admin has just said where this student sits, so they are not owed
+        // the current rollover — stamping it stops them being advanced again on
+        // their next visit.
+        promoted_rollover_at: await this.promotionSettings.rolloverAt(),
+      },
+    );
+
+    void this.notificationsService.create({
+      user_id: targetId,
+      type: 'placement_changed',
+      message: `Your academic placement has been updated to ${major.acronym}, Year ${yearLevel}.`,
+      key: 'placementChanged',
+      params: { acronym: major.acronym, year: yearLevel },
+      ref_id: targetId,
+      ref_type: 'user',
+    });
+
+    return {
+      message: 'Placement updated',
+      major_id: majorId,
+      year_level: yearLevel,
+    };
+  }
+
   async unbanUser(targetId: string) {
     const target = await this.users.findOne({
       where: { id: targetId },
@@ -360,7 +570,9 @@ export class AdminService {
     void this.notificationsService.create({
       user_id: targetId,
       type: 'account_unbanned',
-      message: 'Your account has been reinstated.',
+      message:
+        'Your account has been reinstated. You can now access your account again.',
+      key: 'accountReinstated',
       ref_id: targetId,
       ref_type: 'user',
     });
@@ -369,6 +581,27 @@ export class AdminService {
   }
 
   // ─── Subjects ──────────────────────────────────────────────────────────────
+
+  /**
+   * The departments this reviewer answers for — what the review screen names in
+   * its header, so a moderator can see the scope their queue is filtered to.
+   *
+   * `null` majors for an admin: they review everything, which is not the same
+   * as reviewing an empty list, and the two must stay distinguishable (see
+   * scopeMajorIds).
+   */
+  async getReviewerScope(reviewer: Reviewer) {
+    const ids = this.moderation.scopeMajorIds(reviewer);
+    if (ids === null) return { is_admin: true, majors: null };
+    if (!ids.length) return { is_admin: false, majors: [] };
+
+    const majors = await this.majors.find({
+      where: { id: In(ids) },
+      select: { id: true, acronym: true, name: true },
+      order: { acronym: 'ASC' },
+    });
+    return { is_admin: false, majors };
+  }
 
   async getPendingSubjects(reviewer: Reviewer) {
     // null = admin, no limit. [] = moderates nothing, so the queue is empty —
@@ -417,6 +650,8 @@ export class AdminService {
         user_id: subject.submitted_by,
         type: 'subject_approved',
         message: `Your subject "${subject.name}" has been approved.`,
+        key: 'subjectApproved',
+        params: { name: subject.name },
         ref_id: id,
         ref_type: 'subject',
       });
@@ -458,9 +693,11 @@ export class AdminService {
       void this.notificationsService.create({
         user_id: subject.submitted_by,
         type: 'subject_rejected',
-        message: reason
-          ? `Your subject "${subject.name}" was not approved: ${reason}`
-          : `Your subject "${subject.name}" was not approved.`,
+        message: `Your subject "${subject.name}" was not approved.${
+          reason ? ` Reason: ${reason}` : ''
+        }`,
+        key: reason ? 'subjectRejectedReason' : 'subjectRejected',
+        params: { name: subject.name, reason: reason ?? '' },
         ref_id: id,
         ref_type: 'subject',
       });
@@ -478,7 +715,10 @@ export class AdminService {
       .addOrderBy('s.id', 'DESC');
 
     if (search) qb.andWhere('s.name ILIKE :search', { search: `%${search}%` });
-    if (majorId) qb.andWhere('s.major_id = :majorId', { majorId: this.assertUuid(majorId, 'major_id') });
+    if (majorId)
+      qb.andWhere('s.major_id = :majorId', {
+        majorId: this.assertUuid(majorId, 'major_id'),
+      });
     if (status) {
       if (!SUBJECT_STATUSES.includes(status))
         throw new BadRequestException(
@@ -574,9 +814,11 @@ export class AdminService {
     }
 
     // Flatten to match existing frontend shape: one row per file with group_id = upload id
-    const groupRows = rows.flatMap((upload) =>
-      this.flattenUpload(upload, false, 'group'),
-    );
+    const groupRows = (
+      await Promise.all(
+        rows.map((upload) => this.flattenUpload(upload, false, 'group')),
+      )
+    ).flat();
 
     // Plus files added to an upload that is ALREADY approved. Those never
     // re-pend their upload — only the file waits — so they would otherwise
@@ -603,16 +845,26 @@ export class AdminService {
       throw new InternalServerErrorException('Failed to fetch pending files');
     }
 
-    const fileRows = fileUploads.flatMap((upload) =>
-      this.flattenUpload(upload, false, 'file'),
-    );
+    const fileRows = (
+      await Promise.all(
+        fileUploads.map((upload) => this.flattenUpload(upload, false, 'file')),
+      )
+    ).flat();
 
     return [...groupRows, ...fileRows];
   }
 
   // ─── Document group (review page) ──────────────────────────────────────────
 
-  async getDocumentsByGroup(uploadId: string) {
+  /**
+   * One upload and its files, for the review screen.
+   *
+   * Takes a reviewer because reaching this endpoint is not the same as being
+   * allowed to read this upload: a moderator of one department must not open
+   * another's by changing the id in the URL. The department is read from the
+   * loaded upload, never from the request.
+   */
+  async getDocumentsByGroup(uploadId: string, reviewer: Reviewer) {
     const upload = await this.uploads.findOne({
       where: { id: uploadId },
       relations: {
@@ -624,6 +876,10 @@ export class AdminService {
     });
 
     if (!upload) throw new NotFoundException('Upload not found');
+
+    // The department comes from the upload, so the id in the URL decides WHICH
+    // upload is checked, never WHETHER it is.
+    this.moderation.assertCanModerate(reviewer, upload.major_id);
 
     // A pending upload is reviewed as a group. An active one can only be here
     // because files were added to it after approval — those are reviewed on
@@ -642,7 +898,7 @@ export class AdminService {
    * already approved. The queue renders both, so it has to know which endpoint
    * to call.
    */
-  private flattenUpload(
+  private async flattenUpload(
     upload: Upload,
     includeStatus: boolean,
     reviewScope: 'group' | 'file' = 'group',
@@ -662,25 +918,75 @@ export class AdminService {
       majors: upload.major
         ? { id: upload.major.id, acronym: upload.major.acronym }
         : null,
+      /** The cohort the upload is for; the queue shows it as "I3-GIC". */
+      year_level: upload.year_level,
+      /** Which academic year the material belongs to, e.g. "2021-2022". */
+      academic_year: upload.academic_year,
+      /**
+       * Who may see it, as (department, year) pairs. Empty means everyone.
+       * Ids rather than acronyms: this mapper is synchronous and the reviewer
+       * screens already hold the department list they need to name them.
+       */
+      audience: upload.audience ?? [],
+      /** Soft expiry. Null = never; past means hidden from all but staff. */
+      expires_at: upload.expires_at,
       subjects: upload.subject
-        ? { id: upload.subject.id, name: upload.subject.name }
+        ? {
+            id: upload.subject.id,
+            name: upload.subject.name,
+            // The review tables show the acronym: a subject name can be long
+            // enough to push every column after it off the row.
+            acronym: upload.subject.acronym,
+          }
         : null,
       review_scope: reviewScope,
       ...(includeStatus ? { status: upload.status } : {}),
     };
 
-    return (upload.documents ?? []).map((doc) => ({
-      id: doc.id,
-      file_url: doc.file_url,
-      file_size_kb: doc.file_size_kb,
-      // The approvals queue expands a submission to list — and preview — its files.
-      original_name: doc.original_name,
-      preview_url: doc.preview_url,
-      // The FILE's own review state, distinct from `status` above (the
-      // upload's). Only ever 'pending' on a review_scope: 'file' row.
-      file_status: doc.status,
-      ...meta,
-    }));
+    // Signed, not stored: the documents bucket is private. A reviewer has
+    // already been authorised for this department by the guard and
+    // assertCanModerate above, so signing what the query returned is covered by
+    // that same decision. Presigning is local, so this adds no round trips.
+    return await Promise.all(
+      (upload.documents ?? []).map(async (doc) => ({
+        id: doc.id,
+        file_url: await this.signRef(
+          doc.storage_key,
+          doc.file_url,
+          doc.original_name,
+        ),
+        file_size_kb: doc.file_size_kb,
+        // The approvals queue expands a submission to list — and preview — its files.
+        original_name: doc.original_name,
+        preview_url: await this.signRef(
+          doc.preview_key,
+          doc.preview_url,
+          doc.original_name,
+          true,
+        ),
+        // The FILE's own review state, distinct from `status` above (the
+        // upload's). Only ever 'pending' on a review_scope: 'file' row.
+        file_status: doc.status,
+        ...meta,
+      })),
+    );
+  }
+
+  /** See DocumentsService.signOrFallback — same rule, same reasons. */
+  private async signRef(
+    ref: string | null,
+    legacyUrl: string | null,
+    downloadName: string | null,
+    inline = false,
+  ): Promise<string | null> {
+    if (ref) {
+      const signed = await this.storage.signedUrlForRef(ref, {
+        downloadName,
+        inline,
+      });
+      if (signed) return signed;
+    }
+    return legacyUrl;
   }
 
   // ─── Approve / reject upload group ────────────────────────────────────────
@@ -714,7 +1020,9 @@ export class AdminService {
         message:
           fileCount === 1
             ? `Your document "${upload.title}" has been approved.`
-            : `Your ${fileCount} uploaded documents have been approved.`,
+            : `Your ${fileCount} documents have been approved.`,
+        key: fileCount === 1 ? 'documentApproved' : 'documentsApproved',
+        params: { title: upload.title, count: fileCount },
         ref_id: uploadId,
         ref_type: 'document',
       });
@@ -758,6 +1066,8 @@ export class AdminService {
         user_id: file.upload.uploader_id,
         type: 'document_approved',
         message: `The file you added to "${file.upload.title}" has been approved.`,
+        key: 'fileApproved',
+        params: { title: file.upload.title },
         ref_id: file.upload_id,
         ref_type: 'document',
       });
@@ -792,9 +1102,11 @@ export class AdminService {
       void this.notificationsService.create({
         user_id: file.upload.uploader_id,
         type: 'document_rejected',
-        message: reason
-          ? `The file "${name}" you added to "${file.upload.title}" was not approved: ${reason}`
-          : `The file "${name}" you added to "${file.upload.title}" was not approved.`,
+        message: `The file "${name}" you added to "${file.upload.title}" was not approved.${
+          reason ? ` Reason: ${reason}` : ''
+        }`,
+        key: reason ? 'fileRejectedReason' : 'fileRejected',
+        params: { name, title: file.upload.title, reason: reason ?? '' },
         ref_id: file.upload_id,
         ref_type: 'document',
       });
@@ -846,9 +1158,13 @@ export class AdminService {
       void this.notificationsService.create({
         user_id: upload.uploader_id,
         type: 'document_rejected',
-        message: reason
-          ? `Your uploaded document${fileCount > 1 ? 's were' : ' was'} not approved: ${reason}`
-          : `Your uploaded document${fileCount > 1 ? 's were' : ' was'} not approved.`,
+        // Names the document when there is only one, matching the approval.
+        message:
+          fileCount > 1
+            ? `Your ${fileCount} documents were not approved.${reason ? ` Reason: ${reason}` : ''}`
+            : `Your document "${upload.title}" was not approved.${reason ? ` Reason: ${reason}` : ''}`,
+        key: `${fileCount > 1 ? 'documentsRejected' : 'documentRejected'}${reason ? 'Reason' : ''}`,
+        params: { title: upload.title, count: fileCount, reason: reason ?? '' },
         ref_id: uploadId,
         ref_type: 'document',
       });

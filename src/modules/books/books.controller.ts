@@ -21,6 +21,7 @@ import { CreateBookDto } from './dto/create-book.dto';
 import { UpdateBookDto } from './dto/update-book.dto';
 import { CreateRequestDto } from './dto/create-request.dto';
 import { DeclineRequestDto } from './dto/decline-request.dto';
+import { RateLimitTier } from '../../common/rate-limit/rate-limit.decorator';
 
 type AuthReq = { user: { sub: string } };
 
@@ -32,6 +33,7 @@ export class BooksController {
   constructor(private readonly booksService: BooksService) {}
 
   @UseGuards(JwtAuthGuard)
+  @RateLimitTier('upload')
   @Post('upload-cover')
   @UseInterceptors(
     FileInterceptor('file', {
@@ -65,8 +67,17 @@ export class BooksController {
     return this.booksService.donate(req.user.sub, dto);
   }
 
+  /**
+   * Every book on offer, the donor's own listings included — the detail page is
+   * where requesting is refused for your own book, not this list.
+   *
+   * Viewer-aware for one case only: a book with a pending request stays listed
+   * for the donor and the requester, and is hidden from everyone else.
+   */
+  @UseGuards(JwtAuthGuard)
   @Get()
   findAll(
+    @Request() req: AuthReq,
     @Query('major_id') majorId?: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
@@ -75,15 +86,23 @@ export class BooksController {
       majorId,
       page ? Number(page) : undefined,
       limit ? Number(limit) : undefined,
+      req.user.sub,
     );
   }
 
   @UseGuards(JwtAuthGuard)
   @Get('mine')
   getMyBooks(@Request() req: AuthReq, @Query('filter') filter?: string) {
-    const allowed = ['all', 'pending', 'donated'] as const;
+    const allowed = [
+      'all',
+      'pending',
+      'donated',
+      'available',
+      'received',
+      'reserved',
+    ] as const;
     const safe = (allowed as readonly string[]).includes(filter ?? '')
-      ? (filter as 'all' | 'pending' | 'donated')
+      ? (filter as (typeof allowed)[number])
       : 'all';
     return this.booksService.getMyBooks(req.user.sub, safe);
   }
@@ -122,9 +141,15 @@ export class BooksController {
     return this.booksService.getRequestDetail(requestId, req.user.sub);
   }
 
+  /**
+   * Guarded so the donor can be recognised: only they are told who has a
+   * request pending on their book. The route is already behind requiresAuth
+   * on the client.
+   */
+  @UseGuards(JwtAuthGuard)
   @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.booksService.findOne(id);
+  findOne(@Param('id') id: string, @Request() req: AuthReq) {
+    return this.booksService.findOne(id, req.user.sub);
   }
 
   @UseGuards(JwtAuthGuard)
@@ -144,6 +169,7 @@ export class BooksController {
   }
 
   @UseGuards(JwtAuthGuard)
+  @RateLimitTier('book-request')
   @Post(':id/request')
   request(
     @Param('id') id: string,
@@ -153,6 +179,10 @@ export class BooksController {
     return this.booksService.request(id, req.user.sub, dto);
   }
 
+  /**
+   * Accept a request. One click — where and when is settled on Telegram, so
+   * there is nothing to fill in. The book becomes reserved, not donated.
+   */
   @UseGuards(JwtAuthGuard)
   @Patch(':id/request/:requestId/accept')
   accept(
@@ -161,6 +191,34 @@ export class BooksController {
     @Request() req: AuthReq,
   ) {
     return this.booksService.accept(id, requestId, req.user.sub);
+  }
+
+  /**
+   * Call off a reservation. Either side may: the receiver who never collected,
+   * or the donor who changed their mind. The book returns to available.
+   */
+  @UseGuards(JwtAuthGuard)
+  @Patch(':id/request/:requestId/cancel')
+  cancelRequest(
+    @Param('id') id: string,
+    @Param('requestId') requestId: string,
+    @Request() req: AuthReq,
+  ) {
+    return this.booksService.cancel(id, requestId, req.user.sub);
+  }
+
+  /**
+   * The RECEIVER confirms the book changed hands. This is what marks it
+   * donated — acceptance only reserves it.
+   */
+  @UseGuards(JwtAuthGuard)
+  @Patch(':id/request/:requestId/complete')
+  complete(
+    @Param('id') id: string,
+    @Param('requestId') requestId: string,
+    @Request() req: AuthReq,
+  ) {
+    return this.booksService.complete(id, requestId, req.user.sub);
   }
 
   @UseGuards(JwtAuthGuard)

@@ -89,27 +89,31 @@ The seeders break it. Run once, after the migrations:
 $ npm run seed
 ```
 
-That inserts all 13 ITC departments, uploads their logos, and creates one admin
-account. With no
-`SEED_ADMIN_*` variables set it creates `admin@itc.edu.kh` and prints a
-generated password **once** — save it, then change it after first login:
+That inserts all 13 ITC departments and uploads their logos:
 
 ```
   majors:  +13 inserted, 0 already present (13 total)
   logos:   13 uploaded, 0 already had one
-  admin:   created admin@itc.edu.kh
-  ┌─────────────────────────────────────────────────────────
-  │ Generated admin password — shown once, save it now:
-  │   Xfg1ye45WpXr5ggGxy8Ijfc1
-  └─────────────────────────────────────────────────────────
 ```
 
-To choose the credentials instead, set them in `.env` (see `.env.example`):
-`SEED_ADMIN_EMAIL`, `SEED_ADMIN_PASSWORD`, `SEED_ADMIN_FIRST_NAME`,
-`SEED_ADMIN_LAST_NAME`, `SEED_ADMIN_MAJOR`.
+Seeding is **not** wired into application boot, unlike migrations — structure
+must run everywhere, seed data is a judgement call.
 
-Seeding is **not** wired into application boot, unlike migrations — creating an
-admin account on every container restart is not something a server should do.
+### Making the first admin
+
+The seeder no longer creates one, and there is no API route that can: every
+endpoint granting the role sits behind `AdminGuard`, so a fresh database cannot
+produce its first admin through the app. Register an account normally, then
+promote it directly:
+
+```sql
+update users set role = 'admin' where email = 'you@itc.edu.kh';
+```
+
+```bash
+docker exec itc-sharing-db psql -U itc -d itc_sharing \
+  -c "update users set role = 'admin' where email = 'you@itc.edu.kh';"
+```
 Every seeder is idempotent, so re-running is safe: existing departments are
 skipped, and an existing account is left alone (or promoted to admin if it was
 not already).

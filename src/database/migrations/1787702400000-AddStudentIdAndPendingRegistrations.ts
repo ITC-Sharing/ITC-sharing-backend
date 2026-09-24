@@ -12,9 +12,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * Nothing lands in `users` until the whole journey completes: an abandoned
  * registration leaves a pending row that expires, not a half-built account.
  */
-export class AddStudentIdAndPendingRegistrations1787702400000
-  implements MigrationInterface
-{
+export class AddStudentIdAndPendingRegistrations1787702400000 implements MigrationInterface {
   name = 'AddStudentIdAndPendingRegistrations1787702400000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

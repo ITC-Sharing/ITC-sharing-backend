@@ -1,6 +1,7 @@
 import {
   IsNotEmpty,
   IsOptional,
+  ValidateIf,
   IsString,
   IsUUID,
   MaxLength,
@@ -23,21 +24,20 @@ export class CreateBookDto {
   })
   title!: string;
 
+  /**
+   * Optional: the empty string is "Other", i.e. no department. IsOptional only
+   * skips undefined, so the ValidateIf is what lets '' through.
+   */
+  @IsOptional()
+  @ValidateIf((o: CreateBookDto) => o.department !== '')
   @IsUUID('4', { message: 'Department must be a valid selection' })
-  @IsNotEmpty({ message: 'Please select a department' })
-  department!: string;
+  department?: string;
 
   @IsString()
   @IsOptional()
   @MaxLength(1000)
   @Matches(NO_FORBIDDEN_PATTERN, { message: FORBIDDEN_MESSAGE })
   description?: string;
-
-  @IsString()
-  @IsNotEmpty({ message: 'Contact is required' })
-  @MaxLength(200)
-  @Matches(NO_FORBIDDEN_PATTERN, { message: FORBIDDEN_MESSAGE })
-  contact!: string;
 
   @IsString()
   @IsNotEmpty({ message: 'Cover image is required' })

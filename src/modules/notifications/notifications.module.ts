@@ -5,12 +5,15 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { NotificationsController } from './notifications.controller';
 import { NotificationsService } from './notifications.service';
 import { NotificationsGateway } from './notifications.gateway';
-import { Notification } from '../../entities/notification.entity';
+import { Notification } from './entities/notification.entity';
+import { TelegramModule } from '../telegram/telegram.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Notification]),
     ConfigModule,
+    // Second delivery channel, optional at runtime — see create().
+    TelegramModule,
     JwtModule.register({}),
   ],
   controllers: [NotificationsController],

@@ -1,0 +1,15 @@
+export { Major } from '../modules/majors/entities/major.entity';
+export { DepartmentModerator } from '../modules/admin/entities/department-moderator.entity';
+export { User } from '../modules/users/entities/user.entity';
+export { Subject } from '../modules/subjects/entities/subject.entity';
+export { Upload } from '../modules/documents/entities/upload.entity';
+export { DocumentFile } from '../modules/documents/entities/document.entity';
+export { StagedFile } from '../modules/documents/entities/staged-file.entity';
+export { UploadPin } from '../modules/documents/entities/upload-pin.entity';
+export { Notification } from '../modules/notifications/entities/notification.entity';
+export { Book } from '../modules/books/entities/book.entity';
+export { BookRequest } from '../modules/books/entities/book-request.entity';
+export { RefreshToken } from '../modules/auth/entities/refresh-token.entity';
+export { EmailToken } from '../modules/auth/entities/email-token.entity';
+export { TelegramLinkToken } from '../modules/telegram/entities/telegram-link-token.entity';
+export { AppSetting } from '../modules/settings/entities/app-setting.entity';

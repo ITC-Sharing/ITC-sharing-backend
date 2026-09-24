@@ -7,15 +7,17 @@ import { DataSource } from 'typeorm';
  * lowercased acronym (the route slug) and the column is UNIQUE, so re-running
  * this updates nothing and inserts nothing already present.
  *
- * FOUNDATION and DFL are here for a reason worth remembering — no student
- * registers *into* them, but both own course material everyone needs, so they
- * must exist as departments even though they will never appear as anyone's
- * `users.major_id`.
+ * DFL is here for a reason worth remembering — no student registers *into* it,
+ * but it owns course material everyone needs, so it must exist as a department
+ * even though it will never appear as anyone's `users.major_id`. TC is
+ * different: foundation students really are enrolled in it for years 1–2.
  */
 export const MAJORS: { acronym: string; name: string }[] = [
   { acronym: 'AMS', name: 'Department of Applied Mathematics and Statistics' },
   { acronym: 'DFL', name: 'Department of Foreign Languages' },
-  { acronym: 'FOUNDATION', name: 'Department of Foundation Year' },
+  // TC (Tronc Commun) — the current acronym for the foundation year. Earlier
+  // data called it FOUNDATION; ConsolidateFoundationIntoTc renames it.
+  { acronym: 'TC', name: 'Department of Foundation Year' },
   { acronym: 'GAR', name: 'Department of Architectural Engineering' },
   { acronym: 'GCA', name: 'Faculty of Chemical and Food Engineering' },
   { acronym: 'GCI', name: 'Department of Civil Engineering' },

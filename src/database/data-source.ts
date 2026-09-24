@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { DataSource } from 'typeorm';
-import * as entities from '../entities';
+import * as entities from './entities';
 
 /**
  * DataSource for the TypeORM CLI only — `npm run migration:*`.

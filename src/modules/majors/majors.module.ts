@@ -2,8 +2,8 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { MajorsService } from './majors.service';
 import { MajorsController } from './majors.controller';
-import { Major } from '../../entities/major.entity';
-import { User } from '../../entities/user.entity';
+import { Major } from './entities/major.entity';
+import { User } from '../users/entities/user.entity';
 import { AdminGuard } from '../admin/guards/admin.guard';
 
 @Module({

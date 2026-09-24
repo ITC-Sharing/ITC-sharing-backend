@@ -28,6 +28,7 @@ import {
 import { AddFilesDto } from './dto/add-files.dto';
 import { UpdateDocumentDto } from './dto/update-document.dto';
 import { QueryDocumentsDto } from './dto/query-documents.dto';
+import { RateLimitTier } from '../../common/rate-limit/rate-limit.decorator';
 
 type AuthenticatedRequest = {
   user: {
@@ -76,6 +77,7 @@ export class DocumentsController {
    * Multipart upload: files + JSON fields in form-data
    */
   @UseGuards(JwtAuthGuard)
+  @RateLimitTier('upload')
   @Post()
   @UseInterceptors(
     FilesInterceptor('files', MAX_FILES_PER_UPLOAD, {
@@ -106,6 +108,7 @@ export class DocumentsController {
    * pass back as `staged_file_ids` on POST /documents.
    */
   @UseGuards(JwtAuthGuard)
+  @RateLimitTier('upload')
   @Post('staged-files')
   @UseInterceptors(
     FileInterceptor('file', {
@@ -142,6 +145,7 @@ export class DocumentsController {
    * GET /documents?major_id=&subject_id=&doc_type=&search=
    */
   @UseGuards(JwtAuthGuard)
+  @RateLimitTier('search')
   @Get()
   findAll(
     @Query() query: QueryDocumentsDto,
@@ -184,6 +188,37 @@ export class DocumentsController {
   }
 
   /**
+   * PATCH /documents/:id/pinned — body: { pinned: boolean }
+   * Pins any document you can open, yours or not. The pin is yours alone: it
+   * sorts the document first in your own listings and changes nothing for
+   * anyone else.
+   */
+  @UseGuards(JwtAuthGuard)
+  @Patch(':id/pinned')
+  setPinned(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body('pinned') pinned: boolean,
+    @Request() req: AuthenticatedRequest,
+  ) {
+    return this.documentsService.setPinned(id, req.user.sub, !!pinned);
+  }
+
+  /**
+   * PATCH /documents/:id/hidden — body: { hidden: boolean }
+   * Uploader only. Takes the document out of the feed without deleting it and
+   * without touching its review status.
+   */
+  @UseGuards(JwtAuthGuard)
+  @Patch(':id/hidden')
+  setHidden(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body('hidden') hidden: boolean,
+    @Request() req: AuthenticatedRequest,
+  ) {
+    return this.documentsService.setHidden(id, req.user.sub, !!hidden);
+  }
+
+  /**
    * DELETE /documents/:id
    * Soft delete — uploader only
    */
@@ -214,6 +249,7 @@ export class DocumentsController {
    * POST /documents/:id/files — add files to an existing upload (uploader only).
    */
   @UseGuards(JwtAuthGuard)
+  @RateLimitTier('upload')
   @Post(':id/files')
   @UseInterceptors(
     FilesInterceptor('files', MAX_FILES_PER_UPLOAD, {
@@ -240,6 +276,62 @@ export class DocumentsController {
       files,
       dto.staged_file_ids ?? [],
     );
+  }
+
+  /**
+   * GET /documents/files/:fileId/download — a short-lived link to the original.
+   *
+   * The object itself is private; this is the only way to reach it. The service
+   * authorises first and signs only afterwards, so a refused caller never sees
+   * a URL. `search` tier rather than `write`: this is a read, and a reader
+   * opening a folder of files makes several in a row.
+   */
+  @UseGuards(JwtAuthGuard)
+  @RateLimitTier('search')
+  @Get('files/:fileId/download')
+  downloadFile(
+    @Param('fileId', ParseUUIDPipe) fileId: string,
+    @Request() req: AuthenticatedRequest,
+  ) {
+    return this.documentsService.signFileAccess(
+      fileId,
+      req.user.sub,
+      'download',
+    );
+  }
+
+  /**
+   * GET /documents/files/:fileId/preview — same, for the generated PDF.
+   *
+   * Served inline because it is a rendition this server produced; the original
+   * is always an attachment.
+   */
+  @UseGuards(JwtAuthGuard)
+  @RateLimitTier('search')
+  @Get('files/:fileId/preview')
+  previewFile(
+    @Param('fileId', ParseUUIDPipe) fileId: string,
+    @Request() req: AuthenticatedRequest,
+  ) {
+    return this.documentsService.signFileAccess(
+      fileId,
+      req.user.sub,
+      'preview',
+    );
+  }
+
+  /**
+   * PATCH /documents/files/:fileId/hidden — body: { hidden: boolean }
+   * Uploader only. Hiding the last visible file hides its upload too.
+   */
+  @UseGuards(JwtAuthGuard)
+  @Patch('files/:fileId/hidden')
+  setFileHidden(
+    @Param('fileId', ParseUUIDPipe) fileId: string,
+    @Body('hidden') hidden: boolean,
+    @Request() req: AuthenticatedRequest,
+  ) {
+    return this.documentsService.setFileHidden(fileId, req.user.sub, !!hidden);
   }
 
   /**

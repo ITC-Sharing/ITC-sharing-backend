@@ -15,6 +15,7 @@ import { memoryStorage } from 'multer';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { UsersService } from './users.service';
 import { UpdateUserDto } from './dto/update-user.dto';
+import { RateLimitTier } from '../../common/rate-limit/rate-limit.decorator';
 
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const MAX_AVATAR_SIZE = 20 * 1024 * 1024; // 20 MB
@@ -54,6 +55,7 @@ export class UsersController {
    * POST /users/avatar
    * Uploads a new profile picture and returns its public URL.
    */
+  @RateLimitTier('upload')
   @Post('avatar')
   @UseInterceptors(
     FileInterceptor('file', {

@@ -8,12 +8,13 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { Subject } from '../../entities/subject.entity';
+import { Subject } from './entities/subject.entity';
 import { BUCKETS, StorageService } from '../storage/storage.service';
 import { pgCode, errMessage } from '../../common/utils/pg-error';
 import { CreateSubjectDto } from './dto/create-subject.dto';
 import { UpdateSubjectDto } from './dto/update-subject.dto';
 import { acronymFromName } from '../../common/utils/acronym';
+import { NotificationsService } from '../notifications/notifications.service';
 
 @Injectable()
 export class SubjectsService {
@@ -21,6 +22,7 @@ export class SubjectsService {
     @InjectRepository(Subject)
     private readonly subjects: Repository<Subject>,
     private readonly storage: StorageService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   async countsByMajor(majorId: string): Promise<Record<number, number>> {
@@ -128,6 +130,22 @@ export class SubjectsService {
           submitted_by: submittedBy ?? null,
         }),
       );
+
+      /**
+       * Tell whoever reviews this department. Not awaited: the subject is
+       * already saved, and a notification that fails is not a reason to report
+       * the submission as failed.
+       */
+      void this.notifications.createForReviewers({
+        major_id: saved.major_id,
+        type: 'subject_pending',
+        message: `A new subject "${saved.name}" is waiting for review.`,
+        key: 'subjectPending',
+        params: { name: saved.name },
+        ref_id: saved.id,
+        ref_type: 'subject',
+        except_user_id: submittedBy ?? undefined,
+      });
 
       return {
         id: saved.id,

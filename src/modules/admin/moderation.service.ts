@@ -1,8 +1,8 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
-import { DepartmentModerator } from '../../entities/department-moderator.entity';
-import { User } from '../../entities/user.entity';
+import { DepartmentModerator } from './entities/department-moderator.entity';
+import { User } from '../users/entities/user.entity';
 
 /** Who the request is acting as, resolved once per call. */
 export interface Reviewer {
@@ -117,6 +117,16 @@ export class ModerationService {
   /** Strip every assignment — used when an account is banned. */
   async unassignAll(userId: string) {
     await this.moderators.delete({ user_id: userId });
+  }
+
+  /**
+   * The same thing, as a deliberate admin action rather than a side effect of a
+   * ban. Separate so the reply reads like the other assignment endpoints, and
+   * so the ban path keeps its silent, no-message behaviour.
+   */
+  async unassignAllFor(userId: string) {
+    await this.unassignAll(userId);
+    return { message: 'Moderator access removed' };
   }
 
   async unassign(userId: string, majorId: string) {

@@ -9,6 +9,7 @@ import { BaseExceptionFilter } from '@nestjs/core';
 import { Request, Response } from 'express';
 import { DevAlertService } from '../alerts/dev-alert.service';
 import { contextFrom } from '../alerts/request-context';
+import { redactText, safeUrl } from '../logging/redact';
 
 /**
  * Logs every failed request, then hands the response back to Nest's own filter
@@ -46,10 +47,12 @@ export class AllExceptionsFilter extends BaseExceptionFilter {
         exception instanceof HttpException
           ? exception.getStatus()
           : HttpStatus.INTERNAL_SERVER_ERROR;
-      const reason =
-        exception instanceof Error ? exception.message : String(exception);
+      const reason = redactText(
+        exception instanceof Error ? exception.message : String(exception),
+      );
       const who = request.user?.sub ? ` user=${request.user.sub}` : '';
-      const line = `${request.method} ${request.url} → ${status}${who} — ${reason}`;
+      const url = safeUrl(request.url);
+      const line = `${request.method} ${url} → ${status}${who} — ${reason}`;
 
       // A 429 must say when to come back. The throw sites carry the number in
       // `cause` rather than reaching for the response themselves — a service
@@ -67,7 +70,9 @@ export class AllExceptionsFilter extends BaseExceptionFilter {
       if (status >= 500) {
         this.logger.error(
           line,
-          exception instanceof Error ? exception.stack : undefined,
+          exception instanceof Error && exception.stack
+            ? redactText(exception.stack)
+            : undefined,
         );
         /**
          * 5xx only. A 4xx is the API telling a client "no" — a rejected
@@ -79,7 +84,7 @@ export class AllExceptionsFilter extends BaseExceptionFilter {
          */
         this.alerts?.serverError(
           request.method,
-          request.url,
+          url,
           status,
           reason,
           request.user?.email,

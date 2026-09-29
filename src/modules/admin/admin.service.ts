@@ -213,6 +213,7 @@ export class AdminService {
     const qb = this.uploads
       .createQueryBuilder('u')
       .leftJoinAndSelect('u.uploader', 'uploader')
+      .leftJoinAndSelect('u.reviewer', 'reviewer')
       .leftJoinAndSelect('u.major', 'major')
       .leftJoinAndSelect('u.subject', 'subject')
       .leftJoinAndSelect('u.documents', 'documents')
@@ -260,6 +261,18 @@ export class AdminService {
               id: u.uploader.id,
               first_name: u.uploader.first_name,
               last_name: u.uploader.last_name,
+            }
+          : null,
+        /**
+         * Who approved it. Null for anything approved before reviewers were
+         * recorded, and for a reviewer whose account has since been deleted —
+         * the table shows a dash for both rather than inventing a name.
+         */
+        approved_by: u.reviewer
+          ? {
+              id: u.reviewer.id,
+              first_name: u.reviewer.first_name,
+              last_name: u.reviewer.last_name,
             }
           : null,
         majors: u.major ? { id: u.major.id, acronym: u.major.acronym } : null,

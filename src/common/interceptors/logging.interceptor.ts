@@ -8,6 +8,7 @@ import {
 import { Request, Response } from 'express';
 import { Observable } from 'rxjs';
 import { tap } from 'rxjs/operators';
+import { safeUrl } from '../logging/redact';
 
 /**
  * Logs requests that succeed — one line with method, URL, status and how long
@@ -18,6 +19,10 @@ import { tap } from 'rxjs/operators';
  * rejected JWT skips this chain entirely. AllExceptionsFilter catches every
  * failure instead, wherever it came from — the two together cover both halves
  * without logging anything twice.
+ *
+ * The URL goes through safeUrl, never raw. `GET /auth/google/callback?code=…`
+ * carries an OAuth authorization code, and a log line holding one is a log line
+ * holding a way into somebody's account.
  */
 @Injectable()
 export class LoggingInterceptor implements NestInterceptor {
@@ -36,7 +41,8 @@ export class LoggingInterceptor implements NestInterceptor {
         const status = http.getResponse<Response>().statusCode;
         const who = request.user?.sub ? ` user=${request.user.sub}` : '';
         this.logger.log(
-          `${request.method} ${request.url} → ${status} (${Date.now() - startedAt}ms)${who}`,
+          `${request.method} ${safeUrl(request.url)} → ${status} ` +
+            `(${Date.now() - startedAt}ms)${who}`,
         );
       }),
     );

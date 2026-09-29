@@ -85,6 +85,15 @@ export class Upload {
   @Column({ type: 'uuid', nullable: true })
   reviewed_by: string | null;
 
+  /**
+   * The reviewer as a row rather than an id, so a list can name them without a
+   * second query. Nullable twice over: never reviewed, or reviewed by an
+   * account since deleted — the FK is ON DELETE SET NULL.
+   */
+  @ManyToOne(() => User, { nullable: true })
+  @JoinColumn({ name: 'reviewed_by' })
+  reviewer: User | null;
+
   @Column({ type: 'text', nullable: true })
   rejection_reason: string | null;
 

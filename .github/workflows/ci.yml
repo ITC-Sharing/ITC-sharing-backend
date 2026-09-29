@@ -1,0 +1,54 @@
+# Checks every change to the backend before it can be merged.
+#
+# No service containers: `npm test` is scoped to `src` (see the jest block in
+# package.json), and nothing under `src` opens a database connection — the specs
+# run against fakes. The e2e test in `test/` does boot the full AppModule and
+# would need Postgres, which is why it is not part of this workflow.
+name: CI
+
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+
+# A newer push to the same branch makes the older run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Read-only: this workflow inspects the code, it never publishes anything.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Lint, build, test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 20 to match Dockerfile.prod. CI passing on a version the image never
+      # runs would be a check that proves the wrong thing.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # `ci`, not `install`: installs exactly the lockfile and fails if
+      # package.json and package-lock.json disagree.
+      - name: Install dependencies
+        run: npm ci
+
+      # `lint:ci`, not `lint`. The `lint` script passes --fix, which in a
+      # throwaway container rewrites the files and then reports success — a gate
+      # that can never fail.
+      - name: Lint
+        run: npm run lint:ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test -- --ci

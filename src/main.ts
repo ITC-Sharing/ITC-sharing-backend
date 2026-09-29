@@ -4,22 +4,34 @@ import { AppModule } from './app.module';
 import { ValidationPipe } from '@nestjs/common';
 import cookieParser from 'cookie-parser';
 import { securityHeaders } from './common/security/helmet.config';
+import { RedactingLogger } from './common/logging/redacting.logger';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
 
   /**
-   * Proxy trust stays OFF, which is Express's default and is asserted here so
-   * the decision is visible rather than inherited.
-   *
-   * The API is exposed directly today, so `X-Forwarded-For` is written by
-   * whoever is calling. Trusting it would let a caller send a fresh address per
-   * request and slip every IP-keyed rate limit. When nginx or Caddy is put in
-   * front, set this to the exact number of proxy hops — never `true`, which
-   * trusts the whole chain and brings the spoofing back. See
-   * docs/rate-limiting.md.
+   * Every log line is scrubbed on its way out, not at the ~50 places that write
+   * one. See RedactingLogger: a line is redacted because it is a line, rather
+   * than because its author remembered to.
    */
-  app.set('trust proxy', false);
+  app.useLogger(new RedactingLogger());
+
+  /**
+   * Exactly one proxy hop: nginx terminates TLS and forwards to this process,
+   * and nothing else sits in between.
+   *
+   * The number matters, and `true` is the wrong answer even though it "works".
+   * `true` trusts the entire X-Forwarded-For chain, so a caller can prepend a
+   * fresh address to every request and give themselves an unlimited number of
+   * rate-limit buckets. `1` takes the address nginx wrote and ignores anything
+   * the caller put in front of it.
+   *
+   * This is also why it must match the deployment: with this set to 1 while the
+   * API is exposed directly, X-Forwarded-For becomes caller-controlled and the
+   * IP-keyed limits can be bypassed outright. Port 3000 is bound to 127.0.0.1
+   * in docker-compose.prod.yml for that reason. See docs/rate-limiting.md.
+   */
+  app.set('trust proxy', 1);
 
   /**
    * First in the chain, so the headers are on every response — including CORS

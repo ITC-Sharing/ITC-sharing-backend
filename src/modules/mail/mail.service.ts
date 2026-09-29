@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { redactText } from '../../common/logging/redact';
 import { ConfigService } from '@nestjs/config';
 import * as nodemailer from 'nodemailer';
 
@@ -62,9 +63,26 @@ export class MailService {
       'account, you can ignore this email.';
 
     if (!this.transport) {
-      this.logger.warn(
-        `SMTP not configured — code for ${to} is ${code} (not emailed)`,
-      );
+      /**
+       * The code is printed only off production, and the check is on APP_ENV
+       * rather than on a debug flag so it cannot be switched on by accident.
+       *
+       * This exists so a developer with no SMTP server can still finish a
+       * registration. On a real server the same branch would put a live OTP in
+       * the log, where it outlives the three minutes it is valid for and is
+       * readable by anyone who can read logs — which is a different set of
+       * people from those who can read the mailbox it was meant for.
+       */
+      if (this.config.get<string>('APP_ENV') === 'production') {
+        this.logger.error(
+          `SMTP not configured — the verification code for ${to} could not be ` +
+            'sent. It is not logged. Configure SMTP_HOST/SMTP_USER/SMTP_PASS.',
+        );
+      } else {
+        this.logger.warn(
+          `SMTP not configured — code for ${to} is ${code} (not emailed)`,
+        );
+      }
       return;
     }
 
@@ -86,7 +104,7 @@ export class MailService {
       // leave no way to read the OTP out of the logs on a configured server.
       this.logger.error(
         `Failed to send verification code to ${to}`,
-        error instanceof Error ? error.stack : String(error),
+        redactText(error instanceof Error ? error.stack : String(error)),
       );
       throw error;
     }
@@ -162,7 +180,7 @@ export class MailService {
       // working credential sitting in the log of a configured server.
       this.logger.error(
         `Failed to send "${subject}" to ${to}`,
-        error instanceof Error ? error.stack : String(error),
+        redactText(error instanceof Error ? error.stack : String(error)),
       );
       throw error;
     }

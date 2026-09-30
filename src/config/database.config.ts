@@ -16,16 +16,19 @@ export function databaseConfig(config: ConfigService): TypeOrmModuleOptions {
     // migrations that were compiled alongside it.
     migrations: [join(__dirname, '..', 'database', 'migrations', '*.{ts,js}')],
     /**
-     * Pending migrations run at boot. On a single-node deployment this is what
-     * makes `docker compose up` enough to stand up a brand-new database — there
-     * is no separate migrate step to forget, and a restart after a power cut
-     * re-checks rather than re-applies.
+     * Whether this process migrates the schema at boot.
      *
-     * TypeORM takes an advisory lock and records each migration in the
-     * `migrations` table, so running it twice is a no-op. Revisit this if the
-     * backend is ever scaled past one replica.
+     * On by default, because that is what makes `docker compose up` enough to
+     * stand up a brand-new database with no separate step to forget.
+     *
+     * It must be OFF once more than one replica runs. TypeORM takes an advisory
+     * lock, so concurrent migration is safe rather than corrupting — but the
+     * replica that loses the race sits waiting, and a long migration can hold it
+     * past its healthcheck window and get it killed mid-deploy. With replicas,
+     * the `migrate` service in docker-compose.prod.yml runs once and the
+     * backends wait for it to succeed.
      */
-    migrationsRun: true,
+    migrationsRun: config.get<string>('MIGRATIONS_RUN') !== 'false',
     synchronize: false,
   };
 }

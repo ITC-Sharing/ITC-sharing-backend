@@ -17,8 +17,15 @@ async function bootstrap() {
   app.useLogger(new RedactingLogger());
 
   /**
-   * Exactly one proxy hop: nginx terminates TLS and forwards to this process,
-   * and nothing else sits in between.
+   * How many proxies sit in front, counted from this process outwards.
+   *
+   * Configurable because the answer is a deployment fact, not a code one. With
+   * a single backend it is 1 (cloudflared alone). Behind the nginx load
+   * balancer it is 2 — cloudflared writes the real client address into
+   * X-Forwarded-For, then nginx appends cloudflared's own. Trusting one hop too
+   * few attributes every request to the load balancer and collapses all
+   * IP-keyed limits into one bucket; one too many trusts an address the caller
+   * supplied.
    *
    * The number matters, and `true` is the wrong answer even though it "works".
    * `true` trusts the entire X-Forwarded-For chain, so a caller can prepend a
@@ -31,7 +38,7 @@ async function bootstrap() {
    * IP-keyed limits can be bypassed outright. Port 3000 is bound to 127.0.0.1
    * in docker-compose.prod.yml for that reason. See docs/rate-limiting.md.
    */
-  app.set('trust proxy', 1);
+  app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS ?? 1));
 
   /**
    * First in the chain, so the headers are on every response — including CORS

@@ -866,21 +866,37 @@ export class DocumentsService {
       throw new NotFoundException('File not found');
     }
 
-    const ref = variant === 'preview' ? file.preview_key : file.storage_key;
-    if (!ref) {
-      // A row written before the backfill, or an office file with no preview.
-      throw new NotFoundException(
-        variant === 'preview' ? 'No preview for this file' : 'File not found',
-      );
-    }
+    /**
+     * Which object, and whether it may be shown in place.
+     *
+     * `preview` falls back to the original when there is no rendition, which is
+     * the normal case rather than an edge one: a rendition exists only for
+     * office documents, so a PDF — the type most worth previewing — never has
+     * one. Without the fallback this endpoint threw for every PDF, the client
+     * fell back to the URL embedded in the list, and that URL is minted once
+     * per page load and dead five minutes later.
+     */
+    const ref =
+      variant === 'preview'
+        ? (file.preview_key ?? file.storage_key)
+        : file.storage_key;
+
+    if (!ref) throw new NotFoundException('File not found');
+
+    /**
+     * Inline only for a preview of a type that is safe to render.
+     *
+     * A rendition is a PDF this server produced. An original is whatever a
+     * student uploaded, so it is inline only if `inlineSafe` allows it — HTML
+     * and SVG stay attachments, because an inline response would execute on the
+     * storage origin. A download is always an attachment regardless.
+     */
+    const inline = variant === 'preview' && this.inlineSafe(ref);
 
     // Only now does storage get involved.
     const url = await this.storage.signedUrlForRef(ref, {
       downloadName: file.original_name,
-      // A preview is a PDF this server generated, so it is safe to show in
-      // place. An original is whatever a student uploaded and is always an
-      // attachment — an inline HTML or SVG would otherwise run as a page.
-      inline: variant === 'preview',
+      inline,
     });
 
     if (!url) throw new NotFoundException('File not found');

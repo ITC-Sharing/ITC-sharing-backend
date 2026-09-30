@@ -42,7 +42,7 @@ $ cp .env.example .env
 ```
 
 Services:
-- Postgres → `localhost:5432` (db `itc_sharing`, user `itc`)
+- Postgres → `localhost:5432` (db `techno_share`, user `itc`)
 - MinIO API → `localhost:9000` · MinIO console → `localhost:9001` (`minioadmin` / `minioadmin`)
 
 Configuration lives in `.env`:
@@ -111,7 +111,7 @@ update users set role = 'admin' where email = 'you@itc.edu.kh';
 ```
 
 ```bash
-docker exec itc-sharing-db psql -U itc -d itc_sharing \
+docker exec itc-sharing-db psql -U itc -d techno_share \
   -c "update users set role = 'admin' where email = 'you@itc.edu.kh';"
 ```
 Every seeder is idempotent, so re-running is safe: existing departments are

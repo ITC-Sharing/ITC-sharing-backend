@@ -108,8 +108,18 @@ describe('refresh token rotation', () => {
       Promise.resolve({
         id: USER_ID,
         email: 'student@itc.edu.kh',
-        banned_at: banned,
       } as User),
+  };
+
+  /**
+   * Stands in for BanLookupService. The ban moved off the user row into
+   * `user_bans` in DropUserBanColumns, so refresh asks this rather than reading
+   * a column off the record it just loaded.
+   */
+  const bans = {
+    isBanned: () => Promise.resolve(banned !== null),
+    activeBan: () =>
+      Promise.resolve(banned ? { banned_at: banned, reason: null } : null),
   };
 
   /** A signed refresh token with a row to match, as login would leave behind. */
@@ -147,6 +157,7 @@ describe('refresh token rotation', () => {
       configWith(grace),
       {} as never,
       { refreshReuse: () => undefined } as never,
+      bans as never,
     );
   }
 

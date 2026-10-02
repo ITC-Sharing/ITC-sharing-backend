@@ -5,8 +5,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { In, IsNull, Repository } from 'typeorm';
 import { User } from '../users/entities/user.entity';
+import { UserBan } from '../users/entities/user-ban.entity';
+import { BanLookupService } from '../users/ban-lookup.service';
 import { Upload } from '../documents/entities/upload.entity';
 import { DocumentFile } from '../documents/entities/document.entity';
 import { Subject } from '../subjects/entities/subject.entity';
@@ -30,6 +32,8 @@ export class AdminService {
   constructor(
     @InjectRepository(User)
     private readonly users: Repository<User>,
+    @InjectRepository(UserBan)
+    private readonly userBans: Repository<UserBan>,
     @InjectRepository(Upload)
     private readonly uploads: Repository<Upload>,
     @InjectRepository(DocumentFile)
@@ -50,6 +54,7 @@ export class AdminService {
     private readonly notificationsService: NotificationsService,
     private readonly moderation: ModerationService,
     private readonly promotionSettings: PromotionSettingsService,
+    private readonly bans: BanLookupService,
   ) {}
 
   /**
@@ -179,9 +184,11 @@ export class AdminService {
     }
 
     // One query for every assignment, rather than one per user.
-    const moderatedBy = await this.moderation.assignmentsByUser(
-      rows.map((u) => u.id),
-    );
+    const ids = rows.map((u) => u.id);
+    const moderatedBy = await this.moderation.assignmentsByUser(ids);
+    // Same reason: the ban in force now lives in user_bans, and asking per row
+    // would put a query behind every line of the table.
+    const activeBans = await this.bans.activeBansFor(ids);
 
     return rows.map((u) => ({
       id: u.id,
@@ -193,8 +200,10 @@ export class AdminService {
       created_at: u.created_at,
       majors: u.major ? { id: u.major.id, acronym: u.major.acronym } : null,
       // Everything the admin UI needs to show state and offer the right action.
-      banned_at: u.banned_at,
-      ban_reason: u.ban_reason,
+      // Shape unchanged from when these were columns on `users`, so the client
+      // reads the same fields.
+      banned_at: activeBans.get(u.id)?.banned_at ?? null,
+      ban_reason: activeBans.get(u.id)?.reason ?? null,
       moderates: moderatedBy.get(u.id) ?? [],
     }));
   }
@@ -475,9 +484,13 @@ export class AdminService {
   /**
    * Ban an account: block sign-in and cut existing sessions.
    *
-   * The row is kept — their uploads and history stay intact, and unbanning is a
-   * single field. Refresh tokens are deleted so an open browser can't renew its
-   * access token; the JWT strategy rejects the current one on its next request.
+   * The row is kept — their uploads and history stay intact, and unbanning
+   * clears three fields. Refresh tokens are deleted so an open browser can't
+   * renew its access token; the JWT strategy rejects the current one on its
+   * next request.
+   *
+   * Also recorded in `user_bans`, which survives the unban. Without it, lifting
+   * a ban erased every trace that it happened.
    */
   async banUser(targetId: string, actorId: string, reason?: string) {
     if (targetId === actorId) {
@@ -486,7 +499,7 @@ export class AdminService {
 
     const target = await this.users.findOne({
       where: { id: targetId },
-      select: { id: true, role: true, banned_at: true },
+      select: { id: true, role: true },
     });
     if (!target) throw new NotFoundException('User not found');
     if (target.role === 'admin') {
@@ -495,14 +508,20 @@ export class AdminService {
       throw new BadRequestException('Demote this admin before banning');
     }
 
-    await this.users.update(
-      { id: targetId },
-      {
-        banned_at: new Date(),
-        ban_reason: reason?.trim() || null,
-        banned_by: actorId,
-      },
-    );
+    // user_bans permits one unlifted row per user, so banning over an open ban
+    // would otherwise fail on that index with a raw constraint error.
+    if (await this.bans.isBanned(targetId)) {
+      throw new BadRequestException('This account is already banned');
+    }
+
+    // One row, one write. `users` carried banned_at/ban_reason/banned_by too
+    // until DropUserBanColumns, and keeping the two in step needed a
+    // transaction around this; the log is now the only place it is recorded.
+    await this.userBans.insert({
+      user_id: targetId,
+      reason: reason?.trim() || null,
+      banned_by: actorId,
+    });
 
     // Without this, a stored refresh token would mint new access tokens.
     await this.refreshTokens.delete({ user_id: targetId });
@@ -569,16 +588,19 @@ export class AdminService {
     };
   }
 
-  async unbanUser(targetId: string) {
+  async unbanUser(targetId: string, actorId: string) {
     const target = await this.users.findOne({
       where: { id: targetId },
       select: { id: true },
     });
     if (!target) throw new NotFoundException('User not found');
 
-    await this.users.update(
-      { id: targetId },
-      { banned_at: null, ban_reason: null, banned_by: null },
+    // Stamped, never deleted — keeping the record is the whole point of the
+    // table. Scoped to the unlifted row, so an earlier ban keeps the date it
+    // was actually lifted.
+    await this.userBans.update(
+      { user_id: targetId, lifted_at: IsNull() },
+      { lifted_at: new Date(), lifted_by: actorId },
     );
 
     void this.notificationsService.create({
@@ -592,6 +614,37 @@ export class AdminService {
     });
 
     return { message: 'User unbanned' };
+  }
+
+  /**
+   * Every ban this account has had, newest first.
+   *
+   * The whole reason the table exists: an admin deciding whether to ban someone
+   * can see they have been banned before, and by whom — which the flag on
+   * `users` could not answer, because it only ever described the ban in force.
+   *
+   * Not paginated — an account with enough bans to need paging has a problem no
+   * page size solves.
+   */
+  async getUserBans(targetId: string) {
+    const bans = await this.userBans.find({
+      where: { user_id: targetId },
+      relations: { bannedBy: true, liftedBy: true },
+      order: { banned_at: 'DESC' },
+    });
+
+    const name = (u: User | null) =>
+      u ? { id: u.id, first_name: u.first_name, last_name: u.last_name } : null;
+
+    return bans.map((b) => ({
+      id: b.id,
+      reason: b.reason,
+      banned_at: b.banned_at,
+      banned_by: name(b.bannedBy),
+      lifted_at: b.lifted_at,
+      lifted_by: name(b.liftedBy),
+      active: b.lifted_at === null,
+    }));
   }
 
   // ─── Subjects ──────────────────────────────────────────────────────────────

@@ -237,6 +237,15 @@ describe('email verification and password reset', () => {
         serverError: () => undefined,
         mayIncludeCodes: false,
       } as never,
+      /**
+       * BanLookupService. No test here bans anybody — these flows are about
+       * verification and reset — so it answers "not banned" throughout. The
+       * ban paths are covered in refresh-rotation.spec.
+       */
+      {
+        isBanned: () => Promise.resolve(false),
+        activeBan: () => Promise.resolve(null),
+      } as never,
     );
   });
 
@@ -519,7 +528,6 @@ describe('email verification and password reset', () => {
           email: 'google@itc.edu.kh',
           password_hash: null,
           email_verified_at: new Date(),
-          banned_at: null,
         }),
       );
 

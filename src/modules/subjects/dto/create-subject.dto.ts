@@ -26,7 +26,7 @@ export class CreateSubjectDto {
   major_id!: string;
 
   @IsString()
-  @MaxLength(20)
+  @MaxLength(100)
   @Matches(SUBJECT_NAME_PATTERN, {
     message: 'Subject name must not contain special characters',
   })

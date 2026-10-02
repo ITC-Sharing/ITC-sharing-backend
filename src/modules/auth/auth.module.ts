@@ -6,6 +6,7 @@ import { AuthController } from './auth.controller';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { BansModule } from '../users/bans.module';
 import { User } from '../users/entities/user.entity';
 import { RefreshToken } from './entities/refresh-token.entity';
 import { EmailToken } from './entities/email-token.entity';
@@ -15,6 +16,7 @@ import ms from 'ms';
   imports: [
     ConfigModule,
     TypeOrmModule.forFeature([User, RefreshToken, EmailToken]),
+    BansModule,
     PassportModule.register({ defaultStrategy: 'jwt' }),
     JwtModule.registerAsync({
       imports: [ConfigModule],

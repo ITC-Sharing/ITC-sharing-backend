@@ -175,8 +175,17 @@ export class AdminController {
 
   /** PATCH /admin/users/:id/unban */
   @Patch('users/:id/unban')
-  unbanUser(@Param('id', ParseUUIDPipe) id: string) {
-    return this.adminService.unbanUser(id);
+  unbanUser(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Request() req: ReviewerRequest,
+  ) {
+    return this.adminService.unbanUser(id, req.user!.sub!);
+  }
+
+  /** GET /admin/users/:id/bans — every ban this account has had. */
+  @Get('users/:id/bans')
+  getUserBans(@Param('id', ParseUUIDPipe) id: string) {
+    return this.adminService.getUserBans(id);
   }
 
   // ─── Moderators (admin only) ─────────────────────────────────────────────

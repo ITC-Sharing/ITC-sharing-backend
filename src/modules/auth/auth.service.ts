@@ -11,6 +11,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
 import { User } from '../users/entities/user.entity';
+import { BanLookupService } from '../users/ban-lookup.service';
 import { RefreshToken } from './entities/refresh-token.entity';
 import {
   EmailToken,
@@ -44,6 +45,7 @@ export class AuthService {
      * login. The service knows nothing of the Bot API — it reports events.
      */
     private readonly alerts: DevAlertService,
+    private readonly bans: BanLookupService,
   ) {}
 
   /** How long each secret is good for, by what it authorises. */
@@ -263,7 +265,8 @@ export class AuthService {
 
     // Checked after the password so a wrong guess can't reveal that an account
     // exists and is banned.
-    if (user.banned_at) {
+    const ban = await this.bans.activeBan(user.id);
+    if (ban) {
       this.alerts.loginFailed(
         {
           login: dto.email,
@@ -274,8 +277,8 @@ export class AuthService {
         ctx,
       );
       throw new ForbiddenException(
-        user.ban_reason
-          ? `Your account has been banned: ${user.ban_reason}`
+        ban.reason
+          ? `Your account has been banned: ${ban.reason}`
           : 'Your account has been banned',
       );
     }
@@ -418,7 +421,8 @@ export class AuthService {
       }
     }
 
-    if (user.banned_at) {
+    const googleBan = await this.bans.activeBan(user.id);
+    if (googleBan) {
       this.alerts.loginFailed(
         {
           login: 'Google OAuth',
@@ -429,8 +433,8 @@ export class AuthService {
         ctx,
       );
       throw new ForbiddenException(
-        user.ban_reason
-          ? `Your account has been banned: ${user.ban_reason}`
+        googleBan.reason
+          ? `Your account has been banned: ${googleBan.reason}`
           : 'Your account has been banned',
       );
     }
@@ -512,13 +516,13 @@ export class AuthService {
 
     const user = await this.users.findOne({
       where: { id: payload.sub },
-      select: { id: true, email: true, banned_at: true },
+      select: { id: true, email: true },
     });
 
     if (!user) throw new UnauthorizedException('User no longer exists');
     // Banning revokes stored refresh tokens, but check anyway: this is the one
     // place a long-lived session could otherwise renew itself.
-    if (user.banned_at)
+    if (await this.bans.isBanned(user.id))
       throw new ForbiddenException('Your account has been banned');
 
     const accessToken = this.signToken(user.id, user.email);
@@ -668,7 +672,11 @@ export class AuthService {
   async resendVerification(email: string) {
     const user = await this.findByEmail(email);
 
-    if (user && !user.email_verified_at && !user.banned_at) {
+    if (
+      user &&
+      !user.email_verified_at &&
+      !(await this.bans.isBanned(user.id))
+    ) {
       await this.issueEmailToken(user, 'verify');
     }
 
@@ -690,7 +698,11 @@ export class AuthService {
   async forgotPassword(email: string, ctx?: RequestCtx) {
     const user = await this.findByEmail(email);
 
-    if (user?.password_hash && user.email_verified_at && !user.banned_at) {
+    if (
+      user?.password_hash &&
+      user.email_verified_at &&
+      !(await this.bans.isBanned(user.id))
+    ) {
       await this.issueEmailToken(user, 'reset');
     } else {
       /**
@@ -809,7 +821,8 @@ export class AuthService {
     );
 
     const user = await this.findByEmail(email);
-    if (!user || user.banned_at || reject?.(user)) throw generic;
+    if (!user || reject?.(user) || (await this.bans.isBanned(user.id)))
+      throw generic;
 
     const row = await this.emailTokens.findOne({
       where: { user_id: user.id, purpose, consumed_at: IsNull() },

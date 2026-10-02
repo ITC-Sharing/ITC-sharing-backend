@@ -227,7 +227,10 @@ export class NotificationsService {
       recipients = await this.notifications.manager.query<{ id: string }[]>(
         `select u.id
            from users u
-          where u.banned_at is null
+          where not exists (select 1
+                              from user_bans ub
+                             where ub.user_id = u.id
+                               and ub.lifted_at is null)
             and (lower(u.role) = 'admin'
                  or exists (select 1
                               from department_moderators m

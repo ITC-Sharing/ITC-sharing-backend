@@ -97,38 +97,27 @@ export class User {
   @Column({ type: 'timestamptz', nullable: true })
   telegram_linked_at: Date | null;
 
-  /** Set when an admin bans the account; null means active. */
-  /**
-   * LEGACY. The calendar year of the last automatic July rollover applied to
-   * this student.
-   *
-   * Nothing reads or writes it any more: the July rule was removed, and
-   * promotion is now driven entirely by the admin-scheduled rollover recorded
-   * in promoted_rollover_at. Kept so the record of past promotions is not
-   * thrown away; safe to drop once that history stops mattering.
-   */
-  @Column({ type: 'int', nullable: true })
-  promoted_for_year: number | null;
-
   /**
    * The manual rollover instant this student has already been advanced for.
    *
-   * Separate from promoted_for_year because that counts academic years: two
-   * rollovers set inside the same year look identical to it, so the second one
-   * moved nobody. An instant identifies the event, which is what makes "has
-   * this student had THIS rollover?" answerable.
+   * An instant, not a year number: two rollovers can be scheduled inside one
+   * academic year, and a year makes the second look like the first — so nobody
+   * moves. This identifies the event, which is what makes "has this student had
+   * THIS rollover?" answerable. The year-counting column it replaced,
+   * promoted_for_year, was dropped in DropUserPromotedForYear.
    */
   @Column({ type: 'timestamptz', nullable: true })
   promoted_rollover_at: Date | null;
 
-  @Column({ type: 'timestamptz', nullable: true })
-  banned_at: Date | null;
-
-  @Column({ type: 'text', nullable: true })
-  ban_reason: string | null;
-
-  @Column({ type: 'uuid', nullable: true })
-  banned_by: string | null;
+  /**
+   * Whether this account is banned is NOT stored here.
+   *
+   * banned_at / ban_reason / banned_by lived on this row until
+   * DropUserBanColumns. They duplicated `user_bans`, which had to hold the same
+   * facts anyway to keep a history across unbans — and a ban recorded twice
+   * needed a transaction to stay consistent. Ask BanLookupService, or join
+   * `user_bans` on `lifted_at is null` as the JWT strategy does.
+   */
 
   @CreateDateColumn({ type: 'timestamptz' })
   created_at: Date;

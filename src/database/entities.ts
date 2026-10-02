@@ -13,3 +13,4 @@ export { RefreshToken } from '../modules/auth/entities/refresh-token.entity';
 export { EmailToken } from '../modules/auth/entities/email-token.entity';
 export { TelegramLinkToken } from '../modules/telegram/entities/telegram-link-token.entity';
 export { AppSetting } from '../modules/settings/entities/app-setting.entity';
+export { UserBan } from '../modules/users/entities/user-ban.entity';

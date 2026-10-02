@@ -9,6 +9,8 @@ import { ReviewerGuard } from './guards/reviewer.guard';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { SettingsModule } from '../settings/settings.module';
 import { User } from '../users/entities/user.entity';
+import { UserBan } from '../users/entities/user-ban.entity';
+import { BansModule } from '../users/bans.module';
 import { Upload } from '../documents/entities/upload.entity';
 import { DocumentFile } from '../documents/entities/document.entity';
 import { Subject } from '../subjects/entities/subject.entity';
@@ -22,6 +24,7 @@ import { Major } from '../majors/entities/major.entity';
 @Module({
   imports: [
     TypeOrmModule.forFeature([
+      UserBan,
       User,
       Upload,
       DocumentFile,
@@ -33,6 +36,7 @@ import { Major } from '../majors/entities/major.entity';
       Notification,
       Major,
     ]),
+    BansModule,
     NotificationsModule,
     SettingsModule,
   ],
